@@ -4,19 +4,21 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
+const compression = require('compression');
 
 const {
   startScheduler, executeBatch, getState, getLastResults,
   generateExcel, initDb, getApiKeys, getLogs, pushToInstantly,
   getManualSentBatches, toggleManualSent, markInstantlySent, resetSentLast2Days,
   generatePersonalization, enrichNewCreators, enrichBatch, resetEnrichment,
-  lookupCreator,
+  lookupCreator, sortByBest, generateRankedWorkbook,
 } = require('./scheduler');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
+app.use(compression());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public'), { etag: false, lastModified: false, setHeaders: (res) => res.setHeader('Cache-Control', 'no-store') }));
 
@@ -91,10 +93,23 @@ app.get('/api/results/all', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Lightweight change signature — lets the UI skip re-downloading the full list
+app.get('/api/results/meta', async (req, res) => {
+  try {
+    const rows = await getLastResults(10000);
+    let maxId = 0, sentCount = 0;
+    for (const r of rows) {
+      if (r.id > maxId) maxId = r.id;
+      if (r.instantly_sent_at) sentCount++;
+    }
+    res.json({ count: rows.length, maxId, sentCount });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ─── DOWNLOADS ───────────────────────────────────────────────────────────────
 app.get('/api/download', async (req, res) => {
   try {
-    const all = await getLastResults();
+    const all = await getLastResults(10000, { fresh: true });
     // Exclude creators with email that have already been downloaded
     let rows = all.filter(r => !(r.email && r.email !== 'Not listed' && r.instantly_sent_at));
     if (req.query.hasEmail === 'true') rows = rows.filter(r => r.email && r.email !== 'Not listed');
@@ -113,7 +128,7 @@ app.get('/api/download', async (req, res) => {
 app.get('/api/download/csv', async (req, res) => {
   try {
     const batch = req.query.batch;
-    const all = await getLastResults();
+    const all = await getLastResults(10000, { fresh: true });
     let data = batch ? all.filter(r => String(r.batch_number) === String(batch)) : all;
     // Exclude creators with email that have already been downloaded
     data = data.filter(r => !(r.email && r.email !== 'Not listed' && r.instantly_sent_at));
@@ -151,6 +166,67 @@ app.get('/api/download/csv', async (req, res) => {
     res.send(csv);
     const emails = data.map(r => r.email).filter(Boolean);
     markInstantlySent(emails).catch(() => {});
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── RANKED TOP-N DOWNLOAD ───────────────────────────────────────────────────
+// Best creators first (avg views 50%, like ratio 25%, comment ratio 25%),
+// separated into Has Email / No Email. Does NOT mark anyone as sent.
+const hasEmail = r => r.email && r.email !== 'Not listed';
+
+app.get('/api/download/top', async (req, res) => {
+  try {
+    const count = Math.max(parseInt(req.query.count) || 0, 0); // 0 = all
+    const format = req.query.format === 'csv' ? 'csv' : 'xlsx';
+    let rows = await getLastResults(10000, { fresh: true });
+    if (req.query.email === 'has') rows = rows.filter(hasEmail);
+    if (req.query.email === 'none') rows = rows.filter(r => !hasEmail(r));
+    if (req.query.excludeSent === 'true') rows = rows.filter(r => !r.instantly_sent_at);
+    rows = sortByBest(rows);
+    if (count > 0) rows = rows.slice(0, count);
+    if (!rows.length) return res.status(404).json({ error: 'No creators match' });
+    rows.forEach((r, i) => { r.rank = i + 1; });
+
+    const withEmail = rows.filter(hasEmail);
+    const noEmail = rows.filter(r => !hasEmail(r));
+    const label = count > 0 ? `top-${count}` : 'all-ranked';
+
+    if (format === 'xlsx') {
+      const XLSX = require('xlsx');
+      const wb = generateRankedWorkbook([
+        { name: 'Has Email', rows: withEmail },
+        { name: 'No Email', rows: noEmail },
+      ]);
+      const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="bemellou-${label}-creators.xlsx"`);
+      return res.send(buf);
+    }
+
+    // CSV: Has Email rows first, then No Email, with Rank + Best Score + Has Email columns
+    const cols = [
+      'rank', 'best_score', 'has_email', 'first_name', 'handle', 'email', 'niche',
+      'subscriber_count', 'avg_views', 'avg_likes', 'avg_comments', 'like_ratio',
+      'comment_ratio', 'country', 'upload_frequency', 'total_views', 'video_count',
+      'channel_url', 'date_found', 'batch_number',
+    ];
+    const headers = [
+      'Rank', 'Best Score', 'Has Email', 'Name', 'Handle', 'Email', 'Niche',
+      'Subscribers', 'Avg Views', 'Avg Likes', 'Avg Comments', 'Like Ratio',
+      'Comment Ratio', 'Country', 'Uploads/Mo', 'Total Views', 'Video Count',
+      'Channel URL', 'Date Found', 'Batch',
+    ];
+    const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const toLine = r => cols.map(c => {
+      if (c === 'has_email') return esc(hasEmail(r) ? 'Yes' : 'No');
+      const v = r[c];
+      if (c === 'like_ratio' || c === 'comment_ratio') return esc(v != null ? (v * 100).toFixed(2) + '%' : '');
+      return esc(v ?? '');
+    }).join(',');
+    const csv = [headers.map(esc).join(','), ...withEmail.map(toLine), ...noEmail.map(toLine)].join('\n');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="bemellou-${label}-creators.csv"`);
+    res.send(csv);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -193,7 +269,7 @@ app.post('/api/instantly/push', async (req, res) => {
   if (!apiKey) return res.status(400).json({ error: 'INSTANTLY_API_KEY must be set in .env' });
   try {
     const { batch } = req.body;
-    const all = await getLastResults(10000);
+    const all = await getLastResults(10000, { fresh: true });
     const creators = batch ? all.filter(r => String(r.batch_number) === String(batch)) : all;
     if (creators.length === 0) return res.status(404).json({ error: 'No creators found' });
     const batchLabel = batch ? `Batch ${batch}` : 'All Creators';

@@ -176,6 +176,23 @@ body{font-family:'Inter',sans-serif;background:#0f0f0f;color:#f0f0f0;display:fle
 .price-label{font-size:11px;color:#4ade80;opacity:.7;text-transform:uppercase;letter-spacing:.06em;margin-top:2px}
 .price-note{font-size:11px;color:#444;margin-left:auto;text-align:right;line-height:1.5}
 
+/* ── DOWNLOAD MENU ── */
+.dl-wrap{position:relative}
+.dl-menu{position:absolute;right:0;top:calc(100% + 6px);background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:14px;width:290px;z-index:100;display:none;box-shadow:0 12px 32px rgba(0,0,0,.55)}
+.dl-menu.open{display:block}
+.dl-menu-title{font-size:11px;font-weight:600;color:#4ade80;text-transform:uppercase;letter-spacing:.06em;margin-bottom:9px}
+.dl-menu-title.muted{color:#666}
+.dl-select{width:100%;background:#1e1e1e;border:1px solid #2a2a2a;border-radius:6px;color:#f0f0f0;font-size:12px;padding:7px 9px;font-family:'Inter',sans-serif;outline:none;cursor:pointer;margin-bottom:10px}
+.dl-check{display:flex;align-items:center;gap:7px;font-size:11px;color:#888;margin-bottom:10px;cursor:pointer;user-select:none}
+.dl-check input{accent-color:#e53e3e;cursor:pointer}
+.dl-btns{display:flex;gap:8px}
+.dl-btns .btn{flex:1;justify-content:center}
+.dl-sep{border-top:1px solid #222;margin:13px 0}
+.dl-note{font-size:10px;color:#444;margin-top:9px;line-height:1.55}
+
+/* ── LOAD MORE ── */
+.load-more{text-align:center;padding:18px;font-size:11px;color:#444}
+
 /* ── MISC ── */
 .spin{display:inline-block;width:11px;height:11px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:sp .6s linear infinite;vertical-align:middle}
 @keyframes sp{to{transform:rotate(360deg)}}
@@ -282,10 +299,34 @@ body{font-family:'Inter',sans-serif;background:#0f0f0f;color:#f0f0f0;display:fle
     <div class="topbar-right">
       <div class="search-wrap">
         <span class="search-icon">⌕</span>
-        <input type="text" id="search" placeholder="Search name, handle, niche, email…" oninput="renderCards()"/>
+        <input type="text" id="search" placeholder="Search name, handle, niche, email…" oninput="onSearchInput()"/>
       </div>
-      <a id="dl-csv" href="/api/download/csv" class="btn btn-green">↓ CSV</a>
-      <a id="dl-excel" href="/api/download" class="btn">↓ Excel</a>
+      <div class="dl-wrap" id="dl-wrap">
+        <button class="btn btn-green" onclick="toggleDlMenu(event)">↓ Download ▾</button>
+        <div class="dl-menu" id="dl-menu">
+          <div class="dl-menu-title">🏆 Best creators (ranked)</div>
+          <select class="dl-select" id="dl-top-count">
+            <option value="100">Top 100</option>
+            <option value="200">Top 200</option>
+            <option value="300">Top 300</option>
+            <option value="500">Top 500</option>
+            <option value="1000">Top 1000</option>
+            <option value="0">All creators (ranked)</option>
+          </select>
+          <label class="dl-check"><input type="checkbox" id="dl-exclude-sent"/> Skip already-emailed creators</label>
+          <div class="dl-btns">
+            <button class="btn btn-green" onclick="downloadTop('xlsx')">↓ Excel</button>
+            <button class="btn" onclick="downloadTop('csv')">↓ CSV</button>
+          </div>
+          <div class="dl-note">Ranked best → worst by avg views + like &amp; comment ratios. Excel has separate "Has Email" / "No Email" sheets; CSV groups emails first. Follows the Email filter.</div>
+          <div class="dl-sep"></div>
+          <div class="dl-menu-title muted">New leads only (marks as downloaded)</div>
+          <div class="dl-btns">
+            <a id="dl-csv" href="/api/download/csv" class="btn">↓ CSV</a>
+            <a id="dl-excel" href="/api/download" class="btn">↓ Excel</a>
+          </div>
+        </div>
+      </div>
       <button class="btn btn-green" id="instantly-btn" onclick="pushToInstantly()">⚡ Send to Instantly</button>
       <button class="btn btn-red" id="run-btn" onclick="triggerRun()">▶ Run now</button>
     </div>
@@ -293,6 +334,7 @@ body{font-family:'Inter',sans-serif;background:#0f0f0f;color:#f0f0f0;display:fle
 
   <div class="filterbar">
     <span class="filter-label">Sort</span>
+    <button class="sort-btn" onclick="setSort('best')" id="sort-best" style="border-color:#3d2a10;color:#fbbf24">🏆 Best</button>
     <button class="sort-btn active" onclick="setSort('date')" id="sort-date">Date</button>
     <button class="sort-btn" onclick="setSort('views')" id="sort-views">Avg Views</button>
     <button class="sort-btn" onclick="setSort('subs')" id="sort-subs">Subscribers</button>
@@ -323,6 +365,7 @@ body{font-family:'Inter',sans-serif;background:#0f0f0f;color:#f0f0f0;display:fle
       <div class="stat"><div class="lbl">Avg views (shown)</div><div class="val" id="avg-views-stat">—</div></div>
     </div>
     <div id="cards"></div>
+    <div id="load-more" class="load-more" style="display:none"></div>
   </div>
 </div>
 
@@ -383,6 +426,52 @@ function setSort(s) {
   document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('sort-' + s).classList.add('active');
   renderCards();
+}
+
+// Percentile-ranked composite: avg views 50%, like ratio 25%, comment ratio 25%
+// (same formula as the server uses for ranked downloads)
+function computeBestScores(rows) {
+  const pct = (key) => {
+    const vals = rows.map(r => Number(r[key]) || 0);
+    const sorted = [...vals].sort((a, b) => a - b);
+    const firstIdx = new Map();
+    sorted.forEach((v, i) => { if (!firstIdx.has(v)) firstIdx.set(v, i); });
+    const denom = Math.max(sorted.length - 1, 1);
+    return vals.map(v => firstIdx.get(v) / denom);
+  };
+  const views = pct('avg_views'), likes = pct('like_ratio'), comments = pct('comment_ratio');
+  rows.forEach((r, i) => {
+    r.best_score = Math.round((0.5 * views[i] + 0.25 * likes[i] + 0.25 * comments[i]) * 100);
+  });
+}
+
+let searchTimer = null;
+function onSearchInput() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(renderCards, 150);
+}
+
+// ── DOWNLOAD MENU ─────────────────────────────────────────────────────────────
+function toggleDlMenu(e) {
+  e.stopPropagation();
+  document.getElementById('dl-menu').classList.toggle('open');
+}
+document.addEventListener('click', (e) => {
+  const wrap = document.getElementById('dl-wrap');
+  if (wrap && !wrap.contains(e.target)) document.getElementById('dl-menu').classList.remove('open');
+});
+function downloadTop(format) {
+  const count = document.getElementById('dl-top-count').value;
+  const excludeSent = document.getElementById('dl-exclude-sent').checked;
+  const emailFilter = document.getElementById('email-filter').value;
+  const params = new URLSearchParams({ format });
+  if (Number(count) > 0) params.set('count', count);
+  if (excludeSent) params.set('excludeSent', 'true');
+  if (emailFilter === 'has') params.set('email', 'has');
+  if (emailFilter === 'none') params.set('email', 'none');
+  window.location.href = '/api/download/top?' + params.toString();
+  document.getElementById('dl-menu').classList.remove('open');
+  showToast('Preparing ' + (Number(count) > 0 ? 'Top ' + count : 'full ranked') + ' download…');
 }
 function updateCsvLink() {
   const emailFilter = document.getElementById('email-filter').value;
@@ -486,7 +575,8 @@ function getSortedFiltered() {
   if (emailFilter === 'has') filtered = filtered.filter(r => r.email && r.email !== 'Not listed');
   if (emailFilter === 'none') filtered = filtered.filter(r => !r.email || r.email === 'Not listed');
   filtered = [...filtered];
-  if (sortBy === 'views') filtered.sort((a, b) => Number(b.avg_views || 0) - Number(a.avg_views || 0));
+  if (sortBy === 'best') filtered.sort((a, b) => (Number(b.best_score || 0) - Number(a.best_score || 0)) || (Number(b.avg_views || 0) - Number(a.avg_views || 0)));
+  else if (sortBy === 'views') filtered.sort((a, b) => Number(b.avg_views || 0) - Number(a.avg_views || 0));
   else if (sortBy === 'subs') filtered.sort((a, b) => Number(b.subscriber_count || 0) - Number(a.subscriber_count || 0));
   else if (sortBy === 'like') filtered.sort((a, b) => Number(b.like_ratio || 0) - Number(a.like_ratio || 0));
   else if (sortBy === 'comment') filtered.sort((a, b) => Number(b.comment_ratio || 0) - Number(a.comment_ratio || 0));
@@ -495,7 +585,11 @@ function getSortedFiltered() {
   return filtered;
 }
 
-// ── RENDER CARDS ─────────────────────────────────────────────────────────────
+// ── RENDER CARDS (chunked — keeps the page smooth with thousands of creators) ──
+const CHUNK_SIZE = 60;
+let flatList = [];
+let renderedCount = 0;
+
 function renderCards() {
   const filtered = getSortedFiltered();
   document.getElementById('showing').textContent = filtered.length;
@@ -506,17 +600,57 @@ function renderCards() {
   const viewsArr = filtered.map(r => Number(r.avg_views || 0)).filter(v => v > 0);
   const avgV = viewsArr.length ? Math.round(viewsArr.reduce((s, v) => s + v, 0) / viewsArr.length) : 0;
   document.getElementById('avg-views-stat').textContent = avgV ? fmt(avgV) : '—';
+  if (activeBatch === 'all') document.getElementById('section-sub').textContent = allResults.length + ' creators found';
 
   const container = document.getElementById('cards');
   if (filtered.length === 0) {
     container.innerHTML = `<div class="empty"><div class="empty-icon">${allResults.length === 0 ? '🔍' : '🎯'}</div><h3>${allResults.length === 0 ? 'No creators found yet' : 'No results match'}</h3><p>${allResults.length === 0 ? 'Click "Run now" to start discovering YouTubers' : 'Try adjusting your filters'}</p></div>`;
+    flatList = [];
+    document.getElementById('load-more').style.display = 'none';
     return;
   }
 
   const withEmail = filtered.filter(r => r.email && r.email !== 'Not listed');
   const noEmail = filtered.filter(r => !r.email || r.email === 'Not listed');
 
-  function buildCard(r) {
+  flatList = [];
+  if (withEmail.length > 0) {
+    flatList.push({ type: 'header', html: `<div class="section-header">
+      <span class="section-title has-email">✉ Has Email</span>
+      <span class="section-count has-email">${withEmail.length}</span>
+      <span class="section-desc">Can be sent automatically via Instantly</span>
+    </div>` });
+    withEmail.forEach(r => flatList.push({ type: 'card', r }));
+  }
+  if (noEmail.length > 0) {
+    flatList.push({ type: 'header', html: `<div class="section-header">
+      <span class="section-title no-email">No Email</span>
+      <span class="section-count no-email">${noEmail.length}</span>
+      <span class="section-desc">Manual outreach only</span>
+    </div>` });
+    noEmail.forEach(r => flatList.push({ type: 'card', r }));
+  }
+
+  container.innerHTML = '';
+  renderedCount = 0;
+  renderNextChunk();
+}
+
+function renderNextChunk() {
+  if (!flatList.length) return;
+  const container = document.getElementById('cards');
+  const slice = flatList.slice(renderedCount, renderedCount + CHUNK_SIZE);
+  if (slice.length) {
+    container.insertAdjacentHTML('beforeend', slice.map(e => e.type === 'header' ? e.html : buildCard(e.r)).join(''));
+    renderedCount += slice.length;
+  }
+  const remaining = flatList.length - renderedCount;
+  const lm = document.getElementById('load-more');
+  lm.style.display = remaining > 0 ? 'block' : 'none';
+  if (remaining > 0) lm.textContent = `Scroll for more · ${remaining.toLocaleString()} remaining`;
+}
+
+function buildCard(r) {
     const name = r.first_name || 'Unknown';
     const handle = r.handle || '';
     const email = r.email && r.email !== 'Not listed' ? r.email : '';
@@ -551,6 +685,7 @@ function renderCards() {
           ${isSent ? `<span class="sent-tag">✓ SENT</span>` : ''}
         </div>
         <div class="metrics">
+          ${r.best_score != null ? `<div class="metric${sortBy === 'best' ? ' highlight' : ''}" style="border-color:#3d2a10"><div class="ml" style="color:#fbbf24">🏆 Best score</div><div class="mv" style="color:#fbbf24">${r.best_score}/100</div></div>` : ''}
           <div class="metric${hlView}"><div class="ml">Avg views</div><div class="mv">${fmt(r.avg_views)}</div></div>
           <div class="metric${hlSub}"><div class="ml">Subscribers</div><div class="mv">${fmt(r.subscriber_count)}</div></div>
           <div class="metric${hlLike}"><div class="ml">Like ratio</div><div class="mv">${fmtR(r.like_ratio)}</div></div>
@@ -572,29 +707,6 @@ function renderCards() {
         </div>
       </div>
     </div>`;
-  }
-
-  let html = '';
-
-  if (withEmail.length > 0) {
-    html += `<div class="section-header">
-      <span class="section-title has-email">✉ Has Email</span>
-      <span class="section-count has-email">${withEmail.length}</span>
-      <span class="section-desc">Can be sent automatically via Instantly</span>
-    </div>`;
-    html += withEmail.map(buildCard).join('');
-  }
-
-  if (noEmail.length > 0) {
-    html += `<div class="section-header">
-      <span class="section-title no-email">No Email</span>
-      <span class="section-count no-email">${noEmail.length}</span>
-      <span class="section-desc">Manual outreach only</span>
-    </div>`;
-    html += noEmail.map(buildCard).join('');
-  }
-
-  container.innerHTML = html;
 }
 
 function escHtml(s) {
@@ -633,10 +745,12 @@ function startCountdown() {
 }
 
 // ── STATUS POLLING ────────────────────────────────────────────────────────────
+let isRunningNow = false;
 async function fetchStatus() {
   try {
     const r = await fetch('/api/status');
     const d = await r.json();
+    isRunningNow = !!d.isRunning;
     const btn = document.getElementById('run-btn');
     const dot = document.getElementById('status-dot');
     const txt = document.getElementById('status-text');
@@ -702,20 +816,41 @@ async function fetchLogs() {
   } catch (e) {}
 }
 
+let lastMetaSig = '';
+
+function metaSig(count, maxId, sentCount) { return count + '|' + maxId + '|' + sentCount; }
+
 async function fetchResults() {
   try {
     const r = await fetch('/api/results/all');
     const d = await r.json();
     if (!Array.isArray(d)) return;
     allResults = d;
+    computeBestScores(allResults);
+    let maxId = 0, sentCount = 0;
     batches = {};
     d.forEach(r => {
       const b = r.batch_number || 1;
       if (!batches[b]) batches[b] = [];
       batches[b].push(r);
+      if (r.id > maxId) maxId = r.id;
+      if (r.instantly_sent_at) sentCount++;
     });
+    lastMetaSig = metaSig(d.length, maxId, sentCount);
     buildSidebar();
     renderCards();
+  } catch (e) {}
+}
+
+// Poll a tiny signature instead of re-downloading the full list every 10s;
+// only refetch everything when something actually changed.
+async function checkForNewResults() {
+  try {
+    const r = await fetch('/api/results/meta');
+    const d = await r.json();
+    if (d && typeof d.count === 'number' && metaSig(d.count, d.maxId, d.sentCount) !== lastMetaSig) {
+      await fetchResults();
+    }
   } catch (e) {}
 }
 
@@ -885,12 +1020,18 @@ fetchResults();
 fetchLogs();
 fetchManualSent();
 
-// Status + progress: every 5s
-setInterval(() => { fetchStatus(); fetchProgress(); }, 5000);
-// Results: every 10s
-setInterval(fetchResults, 10000);
-// Logs: every 4s
-setInterval(fetchLogs, 4000);
+// Load more cards as you approach the bottom (600px lookahead keeps it seamless)
+const lmObserver = new IntersectionObserver((entries) => {
+  if (entries[0].isIntersecting) renderNextChunk();
+}, { root: document.querySelector('.content'), rootMargin: '600px' });
+lmObserver.observe(document.getElementById('load-more'));
+
+// Status every 5s; live progress only while a batch is running
+setInterval(() => { fetchStatus(); if (isRunningNow) fetchProgress(); }, 5000);
+// Results: lightweight change check every 10s, full refetch only on change
+setInterval(checkForNewResults, 10000);
+// Logs: every 8s
+setInterval(fetchLogs, 8000);
 // Manual sent: every 30s
 setInterval(fetchManualSent, 30000);
 </script>

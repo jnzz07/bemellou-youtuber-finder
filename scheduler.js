@@ -133,6 +133,7 @@ async function saveCreator(row) {
         row.niche, row.channel_url, row.date_found, row.batch_number,
         row.video_count, row.total_views, row.country, row.upload_frequency, row.thumbnail_url,
         row.ideal_price, row.last_posted_at, row.commission_score]);
+    invalidateResultsCache();
   } catch (e) { log(`Save error ${row.handle}: ${e.message}`); }
 }
 
@@ -154,13 +155,47 @@ async function getSeenChannels() {
   } catch (e) { return new Set(); }
 }
 
-async function getLastResults(limit = 10000) {
+// Short-lived cache so UI polling doesn't hit Postgres on every request
+let resultsCache = { rows: null, at: 0 };
+const RESULTS_CACHE_TTL = 10_000;
+
+function invalidateResultsCache() { resultsCache = { rows: null, at: 0 }; }
+
+async function getLastResults(limit = 10000, { fresh = false } = {}) {
   const p = getPool();
   if (!p) return memoryResults.slice(-limit);
+  if (!fresh && resultsCache.rows && Date.now() - resultsCache.at < RESULTS_CACHE_TTL) {
+    return resultsCache.rows.slice(0, limit);
+  }
   try {
-    const res = await p.query('SELECT * FROM creators ORDER BY batch_number ASC, id ASC LIMIT $1', [limit]);
-    return res.rows;
+    const res = await p.query('SELECT * FROM creators ORDER BY batch_number ASC, id ASC LIMIT 10000');
+    resultsCache = { rows: res.rows, at: Date.now() };
+    return res.rows.slice(0, limit);
   } catch (e) { return []; }
+}
+
+// ─── BEST SCORE ───────────────────────────────────────────────────────────────
+// Percentile-ranked composite: avg views 50%, like ratio 25%, comment ratio 25%
+function computeBestScores(rows) {
+  const pct = (key) => {
+    const vals = rows.map(r => Number(r[key]) || 0);
+    const sorted = [...vals].sort((a, b) => a - b);
+    const firstIdx = new Map();
+    sorted.forEach((v, i) => { if (!firstIdx.has(v)) firstIdx.set(v, i); });
+    const denom = Math.max(sorted.length - 1, 1);
+    return vals.map(v => firstIdx.get(v) / denom);
+  };
+  const views = pct('avg_views'), likes = pct('like_ratio'), comments = pct('comment_ratio');
+  rows.forEach((r, i) => {
+    r.best_score = Math.round((0.5 * views[i] + 0.25 * likes[i] + 0.25 * comments[i]) * 100);
+  });
+  return rows;
+}
+
+function sortByBest(rows) {
+  computeBestScores(rows);
+  return [...rows].sort((a, b) =>
+    (b.best_score - a.best_score) || (Number(b.avg_views || 0) - Number(a.avg_views || 0)));
 }
 
 // ─── IN-MEMORY STATE ──────────────────────────────────────────────────────────
@@ -970,17 +1005,37 @@ const EXCEL_COLS = [
   { key: 'looking_forward', header: 'LOOKING FORWARD', width: 55 },
 ];
 
-function generateExcel(rows) {
-  const wb = XLSX.utils.book_new();
-  const headers = EXCEL_COLS.map(c => c.header);
-  const data = rows.map(r => EXCEL_COLS.map(c => {
+function buildSheet(rows, cols) {
+  const headers = cols.map(c => c.header);
+  const data = rows.map((r, i) => cols.map(c => {
+    if (c.key === 'rank') return r.rank != null ? r.rank : i + 1;
     const v = r[c.key];
     if (c.key === 'like_ratio' || c.key === 'comment_ratio') return v != null ? parseFloat((v * 100).toFixed(2)) : '';
     return v != null ? v : '';
   }));
   const ws = XLSX.utils.aoa_to_sheet([headers, ...data]);
-  ws['!cols'] = EXCEL_COLS.map(c => ({ wch: c.width }));
-  XLSX.utils.book_append_sheet(wb, ws, 'Creators');
+  ws['!cols'] = cols.map(c => ({ wch: c.width }));
+  return ws;
+}
+
+function generateExcel(rows) {
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, buildSheet(rows, EXCEL_COLS), 'Creators');
+  return wb;
+}
+
+// Ranked export: one sheet per group (e.g. Has Email / No Email), with Rank + Best Score
+function generateRankedWorkbook(groups) {
+  const cols = [
+    { key: 'rank', header: 'Rank', width: 6 },
+    { key: 'best_score', header: 'Best Score', width: 10 },
+    ...EXCEL_COLS,
+  ];
+  const wb = XLSX.utils.book_new();
+  for (const { name, rows } of groups) {
+    if (!rows.length) continue;
+    XLSX.utils.book_append_sheet(wb, buildSheet(rows, cols), name);
+  }
   return wb;
 }
 
@@ -1092,6 +1147,7 @@ async function markInstantlySent(emails) {
   if (!p) { emails.forEach(e => memoryInstantlySent.add(e)); return; }
   try {
     await p.query(`UPDATE creators SET instantly_sent_at = NOW() WHERE email = ANY($1)`, [emails]);
+    invalidateResultsCache();
   } catch (e) { log(`markInstantlySent error: ${e.message}`); }
 }
 
@@ -1110,6 +1166,7 @@ async function resetSentLast2Days() {
       [cutoff]
     );
     log(`resetSentLast2Days: cleared ${result.rowCount} creators`);
+    invalidateResultsCache();
     return result.rowCount;
   } catch (e) {
     log(`resetSentLast2Days error: ${e.message}`);
@@ -1128,12 +1185,14 @@ async function savePersonalization(entries) {
       );
     } catch (err) { log(`savePersonalization error for ${e.handle}: ${err.message}`); }
   }
+  invalidateResultsCache();
 }
 
 async function resetEnrichment() {
   const p = getPool();
   if (!p) return 0;
   const { rowCount } = await p.query(`UPDATE creators SET vibe=NULL, praise=NULL, looking_forward=NULL`);
+  invalidateResultsCache();
   return rowCount;
 }
 
@@ -1341,5 +1400,5 @@ module.exports = {
   initDb, RESULTS_PATH, getApiKeys, getLogs, pushToInstantly,
   getManualSentBatches, toggleManualSent, markInstantlySent, resetSentLast2Days,
   generatePersonalization, enrichNewCreators, enrichBatch, resetEnrichment,
-  lookupCreator,
+  lookupCreator, sortByBest, computeBestScores, generateRankedWorkbook,
 };

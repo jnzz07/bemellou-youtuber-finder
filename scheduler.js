@@ -694,15 +694,38 @@ async function fetchChannelMetrics(ch, km) {
 }
 
 // ─── MAIN BATCH ───────────────────────────────────────────────────────────────
-const TARGET = 500;
+const TARGET = 300;
+
+// App-launch campaign quality gate — high-engagement, closable mental-health creators.
+// A creator must clear ALL thresholds AND fall in the mental-health niche cluster.
+const QUALIFICATION = {
+  minAvgViews:     20000,   // ≥ 20K average views
+  minLikeRatio:    0.10,    // ≥ 10% like-to-view rate
+  minCommentRatio: 0.01,    // ≥ 1% comment-to-view rate
+};
+const CAMPAIGN_NICHES = new Set([
+  'mental health', 'neurodivergent', 'emotional healing', 'chronic illness',
+]);
+
+// Shared campaign-membership predicate — mirrored client-side in public/index.html.
+// A stored creator row belongs to the app-launch campaign segment if it clears every gate.
+function isCampaignCreator(r) {
+  if (!r) return false;
+  return CAMPAIGN_NICHES.has(r.niche)
+    && r.country === 'US'
+    && Number(r.avg_views)     >= QUALIFICATION.minAvgViews
+    && Number(r.like_ratio)    >= QUALIFICATION.minLikeRatio
+    && Number(r.comment_ratio) >= QUALIFICATION.minCommentRatio;
+}
 
 async function runBatch(km) {
   const batchNum = (liveState.batchNumber || 0) + 1;
   log(`=== Batch #${batchNum} START | ${km.keys.length} key(s) ===`);
   await persistState({ isRunning: true, batchNumber: batchNum });
 
-  const seen = await getSeenChannels();
-  const discoveredIds = []; // ordered list of new channel IDs
+  // Campaign mode: re-evaluate previously-seen channels too. saveCreator upserts
+  // by channel ID, so re-finding a qualifier refreshes its row rather than duplicating.
+  const discoveredIds = []; // ordered list of channel IDs (seen or not)
 
   // ── PHASE 1: SEARCH — collect channel IDs ─────────────────────────────────
   // Cap at 180 queries per batch (100 units each = 18,000 units total for search).
@@ -730,7 +753,7 @@ async function runBatch(km) {
 
       for (const item of data?.items || []) {
         const id = item.snippet?.channelId;
-        if (id && !seen.has(id) && !discoveredIds.includes(id)) {
+        if (id && !discoveredIds.includes(id)) {
           discoveredIds.push(id);
         }
       }
@@ -859,6 +882,20 @@ async function runBatch(km) {
         : `https://youtube.com/channel/${ch.id}`;
 
       const detectedNiche = getNiche(ch.title, ch.description, ch.keywords);
+
+      // App-launch campaign gate: mental-health niche + US audience + high engagement + reach.
+      if (
+        !CAMPAIGN_NICHES.has(detectedNiche) ||
+        ch.country !== 'US' ||
+        avgViews    < QUALIFICATION.minAvgViews ||
+        likeRatio   < QUALIFICATION.minLikeRatio ||
+        commentRatio < QUALIFICATION.minCommentRatio
+      ) {
+        await markSeenBatch([ch.id]);
+        await sleep(120);
+        continue;
+      }
+
       const commissionScore = computeCommissionScore({
         subscriberCount: ch.subscriberCount,
         commentRatio,
@@ -1401,4 +1438,5 @@ module.exports = {
   getManualSentBatches, toggleManualSent, markInstantlySent, resetSentLast2Days,
   generatePersonalization, enrichNewCreators, enrichBatch, resetEnrichment,
   lookupCreator, sortByBest, computeBestScores, generateRankedWorkbook,
+  isCampaignCreator, CAMPAIGN_TARGET: TARGET,
 };

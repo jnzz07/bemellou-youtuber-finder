@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
@@ -12,6 +12,7 @@ const {
   getManualSentBatches, toggleManualSent, markInstantlySent, resetSentLast2Days,
   generatePersonalization, enrichNewCreators, enrichBatch, resetEnrichment,
   lookupCreator, sortByBest, generateRankedWorkbook,
+  isCampaignCreator, CAMPAIGN_TARGET,
 } = require('./scheduler');
 
 const app = express();
@@ -29,13 +30,20 @@ app.use(express.static(path.join(__dirname, 'public'), { etag: false, lastModifi
 });
 
 // ─── STATUS ───────────────────────────────────────────────────────────────────
-app.get('/api/status', (req, res) => {
+app.get('/api/status', async (req, res) => {
   const state = getState();
   const keys = getApiKeys();
+  let campaignCount = 0;
+  try {
+    const all = await getLastResults(10000);
+    campaignCount = all.filter(isCampaignCreator).length;
+  } catch (e) { /* status must never fail on the campaign count */ }
   res.json({
     ...state,
     hasApiKey: keys.length > 0,
     apiKeyCount: keys.length,
+    campaignCount,
+    campaignTarget: CAMPAIGN_TARGET,
   });
 });
 
@@ -112,13 +120,14 @@ app.get('/api/download', async (req, res) => {
     const all = await getLastResults(10000, { fresh: true });
     // Exclude creators with email that have already been downloaded
     let rows = all.filter(r => !(r.email && r.email !== 'Not listed' && r.instantly_sent_at));
+    if (req.query.campaign === 'true') rows = rows.filter(isCampaignCreator);
     if (req.query.hasEmail === 'true') rows = rows.filter(r => r.email && r.email !== 'Not listed');
     if (rows.length === 0) return res.status(404).json({ error: 'No new results to download' });
     const XLSX = require('xlsx');
     const wb = generateExcel(rows);
     const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="chubiez-creators-${Date.now()}.xlsx"`);
+    res.setHeader('Content-Disposition', `attachment; filename="bemellou-creators-${Date.now()}.xlsx"`);
     res.send(buf);
     const emails = rows.map(r => r.email).filter(Boolean);
     markInstantlySent(emails).catch(() => {});
@@ -132,6 +141,7 @@ app.get('/api/download/csv', async (req, res) => {
     let data = batch ? all.filter(r => String(r.batch_number) === String(batch)) : all;
     // Exclude creators with email that have already been downloaded
     data = data.filter(r => !(r.email && r.email !== 'Not listed' && r.instantly_sent_at));
+    if (req.query.campaign === 'true') data = data.filter(isCampaignCreator);
     if (req.query.hasEmail === 'true') data = data.filter(r => r.email && r.email !== 'Not listed');
     if (data.length === 0) return res.status(404).json({ error: 'No new results found' });
 
@@ -160,7 +170,9 @@ app.get('/api/download/csv', async (req, res) => {
       }).join(',')),
     ].join('\n');
 
-    const filename = batch ? `chubiez-batch-${batch}.csv` : 'chubiez-all-creators.csv';
+    const filename = req.query.campaign === 'true'
+      ? 'bemellou-campaign-us-creators.csv'
+      : (batch ? `bemellou-batch-${batch}.csv` : 'bemellou-all-creators.csv');
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(csv);
@@ -268,11 +280,12 @@ app.post('/api/instantly/push', async (req, res) => {
   const apiKey = process.env.INSTANTLY_API_KEY;
   if (!apiKey) return res.status(400).json({ error: 'INSTANTLY_API_KEY must be set in .env' });
   try {
-    const { batch } = req.body;
+    const { batch, campaign } = req.body;
     const all = await getLastResults(10000, { fresh: true });
-    const creators = batch ? all.filter(r => String(r.batch_number) === String(batch)) : all;
+    let creators = batch ? all.filter(r => String(r.batch_number) === String(batch)) : all;
+    if (campaign === true || campaign === 'true') creators = creators.filter(isCampaignCreator);
     if (creators.length === 0) return res.status(404).json({ error: 'No creators found' });
-    const batchLabel = batch ? `Batch ${batch}` : 'All Creators';
+    const batchLabel = campaign ? 'Campaign · US' : (batch ? `Batch ${batch}` : 'All Creators');
     const result = await pushToInstantly(creators, apiKey, batchLabel);
     res.json({ success: true, ...result });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -323,7 +336,7 @@ initDb()
   .then(() => {
     app.listen(PORT, () => {
       const keys = getApiKeys();
-      console.log(`\n Chubiez YouTuber Finder running at http://localhost:${PORT}`);
+      console.log(`\n Bemellou YouTuber Finder running at http://localhost:${PORT}`);
       console.log(` ${keys.length} API key(s) loaded`);
       if (keys.length === 0) console.log(' WARNING: No YouTube API keys found!');
       startScheduler();

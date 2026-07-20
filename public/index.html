@@ -248,6 +248,9 @@ body{font-family:'Inter',sans-serif;background:#0f0f0f;color:#f0f0f0;display:fle
     </div>
     <div class="sidebar-section">
       <div class="sidebar-label">Views</div>
+      <div class="sidebar-item" id="item-campaign" onclick="selectView('campaign')" title="Mental-health · US · ≥20K views · ≥10% likes · ≥1% comments">
+        <span>🎯 Campaign · US</span><span class="badge" id="count-campaign">0 / 300</span>
+      </div>
       <div class="sidebar-item active" id="item-all" onclick="selectView('all')">
         <span>All creators</span><span class="badge" id="count-all">0</span>
       </div>
@@ -382,6 +385,19 @@ let logVisible = true;
 let lastLogCount = 0;
 let manualSentBatches = new Set();
 
+// ── CAMPAIGN SEGMENT ────────────────────────────────────────────────────────────
+// Mirror of scheduler.js isCampaignCreator — keep the thresholds in sync.
+const CAMPAIGN_TARGET = 300;
+const CAMPAIGN_NICHES = new Set(['mental health', 'neurodivergent', 'emotional healing', 'chronic illness']);
+function isCampaign(r) {
+  if (!r) return false;
+  return CAMPAIGN_NICHES.has(r.niche)
+    && r.country === 'US'
+    && Number(r.avg_views)     >= 20000
+    && Number(r.like_ratio)    >= 0.10
+    && Number(r.comment_ratio) >= 0.01;
+}
+
 // ── UTILS ─────────────────────────────────────────────────────────────────────
 function fmt(n) {
   const x = Number(n);
@@ -477,7 +493,8 @@ function updateCsvLink() {
   const emailFilter = document.getElementById('email-filter').value;
   const csvParams = [];
   const xlsxParams = [];
-  if (activeBatch !== 'all') csvParams.push('batch=' + activeBatch);
+  if (activeBatch === 'campaign') { csvParams.push('campaign=true'); xlsxParams.push('campaign=true'); }
+  else if (activeBatch !== 'all') csvParams.push('batch=' + activeBatch);
   if (emailFilter === 'has') { csvParams.push('hasEmail=true'); xlsxParams.push('hasEmail=true'); }
   document.getElementById('dl-csv').href = '/api/download/csv' + (csvParams.length ? '?' + csvParams.join('&') : '');
   document.getElementById('dl-excel').href = '/api/download' + (xlsxParams.length ? '?' + xlsxParams.join('&') : '');
@@ -511,11 +528,15 @@ function selectView(v) {
   lookupView.style.display = 'none';
   mainView.style.display = 'flex';
   activeBatch = v;
-  const el = document.getElementById(v === 'all' ? 'item-all' : 'item-batch-' + v);
+  const el = document.getElementById(v === 'all' ? 'item-all' : (v === 'campaign' ? 'item-campaign' : 'item-batch-' + v));
   if (el) el.classList.add('active');
   const title = document.getElementById('section-title');
   const sub = document.getElementById('section-sub');
-  if (v === 'all') {
+  if (v === 'campaign') {
+    const n = allResults.filter(isCampaign).length;
+    title.textContent = 'Campaign creators · US';
+    sub.textContent = n + ' / ' + CAMPAIGN_TARGET + ' qualified · mental-health · ≥20K views · ≥10% likes · ≥1% comments';
+  } else if (v === 'all') {
     title.textContent = 'All creators';
     sub.textContent = allResults.length + ' creators found';
   } else {
@@ -532,6 +553,7 @@ function selectBatch(b) { selectView(b); }
 function buildSidebar() {
   const keys = Object.keys(batches).map(Number).sort((a, b) => b - a);
   document.getElementById('count-all').textContent = allResults.length;
+  document.getElementById('count-campaign').textContent = allResults.filter(isCampaign).length + ' / ' + CAMPAIGN_TARGET;
   document.getElementById('batches-run').textContent = keys.length;
   const list = document.getElementById('batch-list');
   list.innerHTML = '<div class="sidebar-label">Batches</div>';
@@ -560,7 +582,9 @@ function getSortedFiltered() {
   const search = document.getElementById('search').value.toLowerCase();
   const nicheFilter = document.getElementById('niche-filter').value;
   const emailFilter = document.getElementById('email-filter').value;
-  const base = activeBatch === 'all' ? allResults : (batches[activeBatch] || []);
+  const base = activeBatch === 'all' ? allResults
+    : activeBatch === 'campaign' ? allResults.filter(isCampaign)
+    : (batches[activeBatch] || []);
   let filtered = base;
   if (search) {
     filtered = filtered.filter(r =>

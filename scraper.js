@@ -28,32 +28,34 @@ const SEARCH_QUERIES = [
   'wellness vlog',
   'mental health awareness',
   'comfort zone lifestyle',
-'grwm get ready with me',
-'grwm vlog',
-'tarot reading',
-'tarot card reading 2026',
-'daily tarot',
-'makeup tutorial',
-'makeup grwm',
-'soft girl makeup',
-'drugstore makeup',
-'nail art tutorial',
-'hair tutorial',
-'fashion haul',
-'outfit of the day',
-'aesthetic vlog',
-'day in my life aesthetic',
-'study with me',
-'journaling vlog',
-'manifestation routine',
-'astrology reading',
-'spiritual vlog',
+  'anxiety vlog',
+  'depression storytime',
+  'therapy talk',
+  'neurodivergent adhd',
+  'autism acceptance',
+  'burnout recovery',
+  'healing journey',
+  'mental health check in',
+  'coping with anxiety',
+  'my mental health story',
+  'living with depression',
+  'panic attack help',
+  'overstimulated adhd',
+  'emotional support',
+  'lonely gen z',
+  'situationship spiral',
+  'nervous system regulation',
+  'inner child healing',
+  'journaling for anxiety',
+  'grounding techniques',
 ];
 
+// App-launch marketing campaign — high-quality, closable mental-health creators
+const TARGET = 300;
 const QUALIFICATION = {
-  minAvgViews: 1000,
-  minCommentRatio: 1 / 200,   // ≥ 0.0111
-  minLikeRatio: 1 / 20,      // ≥ 0.0909
+  minAvgViews: 20000,          // ≥ 20K average views
+  minCommentRatio: 0.01,       // ≥ 1% comment-to-view rate
+  minLikeRatio: 0.10,          // ≥ 10% like-to-view rate
 };
 
 const NICHE_MAP = {
@@ -252,7 +254,7 @@ async function runBatch(apiKey, onProgress) {
   const seen = loadSeen();
   const found = [];
   let queryIndex = 0;
-  const maxIterations = SEARCH_QUERIES.length * 10;
+  const maxIterations = SEARCH_QUERIES.length * 50;
 
   const batchState = {
     isRunning: true,
@@ -263,7 +265,7 @@ async function runBatch(apiKey, onProgress) {
 
   log('--- Starting new batch ---');
 
-  while (found.length < 50 && queryIndex < maxIterations) {
+  while (found.length < TARGET && queryIndex < maxIterations) {
     const query = SEARCH_QUERIES[queryIndex % SEARCH_QUERIES.length];
     batchState.currentQuery = query;
     log(`Searching: "${query}" (iteration ${queryIndex + 1})`);
@@ -272,7 +274,7 @@ async function runBatch(apiKey, onProgress) {
       const candidates = await searchChannels(query, apiKey);
 
       for (const candidate of candidates) {
-        if (found.length >= 50) break;
+        if (found.length >= TARGET) break;
         if (seen.has(candidate.id)) continue;
 
         seen.add(candidate.id);
@@ -318,7 +320,7 @@ async function runBatch(apiKey, onProgress) {
             };
             found.push(row);
             batchState.qualified = found.length;
-            log(`QUALIFIED: ${details.title} (${found.length}/50)`);
+            log(`QUALIFIED: ${details.title} (${found.length}/${TARGET})`);
           } else {
             log(`Disqualified ${details.title}: ${qual.reasons.join(', ')}`);
           }

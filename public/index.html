@@ -248,7 +248,7 @@ body{font-family:'Inter',sans-serif;background:#0f0f0f;color:#f0f0f0;display:fle
     </div>
     <div class="sidebar-section">
       <div class="sidebar-label">Views</div>
-      <div class="sidebar-item" id="item-campaign" onclick="selectView('campaign')" title="Mental-health · US · ≥20K views · ≥10% likes · ≥1% comments">
+      <div class="sidebar-item" id="item-campaign" onclick="selectView('campaign')" title="Mental-health · US · ≥3% likes · ≥0.5% comments">
         <span>🎯 Campaign · US</span><span class="badge" id="count-campaign">0 / 300</span>
       </div>
       <div class="sidebar-item active" id="item-all" onclick="selectView('all')">
@@ -393,9 +393,8 @@ function isCampaign(r) {
   if (!r) return false;
   return CAMPAIGN_NICHES.has(r.niche)
     && r.country === 'US'
-    && Number(r.avg_views)     >= 20000
-    && Number(r.like_ratio)    >= 0.10
-    && Number(r.comment_ratio) >= 0.01;
+    && Number(r.like_ratio)    >= 0.03
+    && Number(r.comment_ratio) >= 0.005;
 }
 
 // ── UTILS ─────────────────────────────────────────────────────────────────────
@@ -535,7 +534,7 @@ function selectView(v) {
   if (v === 'campaign') {
     const n = allResults.filter(isCampaign).length;
     title.textContent = 'Campaign creators · US';
-    sub.textContent = n + ' / ' + CAMPAIGN_TARGET + ' qualified · mental-health · ≥20K views · ≥10% likes · ≥1% comments';
+    sub.textContent = n + ' / ' + CAMPAIGN_TARGET + ' qualified · mental-health · US · ≥3% likes · ≥0.5% comments';
   } else if (v === 'all') {
     title.textContent = 'All creators';
     sub.textContent = allResults.length + ' creators found';

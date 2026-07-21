@@ -698,10 +698,11 @@ const TARGET = 300;
 
 // App-launch campaign quality gate — high-engagement, closable mental-health creators.
 // A creator must clear ALL thresholds AND fall in the mental-health niche cluster.
+// View floor removed: this pipeline hunts micro/nano creators (best for commission
+// deals), who rarely clear a 20K-view bar. Engagement is the real quality signal.
 const QUALIFICATION = {
-  minAvgViews:     20000,   // ≥ 20K average views
-  minLikeRatio:    0.10,    // ≥ 10% like-to-view rate
-  minCommentRatio: 0.01,    // ≥ 1% comment-to-view rate
+  minLikeRatio:    0.03,    // ≥ 3% like-to-view rate (healthy micro-creator engagement)
+  minCommentRatio: 0.005,   // ≥ 0.5% comment-to-view rate
 };
 const CAMPAIGN_NICHES = new Set([
   'mental health', 'neurodivergent', 'emotional healing', 'chronic illness',
@@ -713,7 +714,6 @@ function isCampaignCreator(r) {
   if (!r) return false;
   return CAMPAIGN_NICHES.has(r.niche)
     && r.country === 'US'
-    && Number(r.avg_views)     >= QUALIFICATION.minAvgViews
     && Number(r.like_ratio)    >= QUALIFICATION.minLikeRatio
     && Number(r.comment_ratio) >= QUALIFICATION.minCommentRatio;
 }
@@ -887,7 +887,6 @@ async function runBatch(km) {
       if (
         !CAMPAIGN_NICHES.has(detectedNiche) ||
         ch.country !== 'US' ||
-        avgViews    < QUALIFICATION.minAvgViews ||
         likeRatio   < QUALIFICATION.minLikeRatio ||
         commentRatio < QUALIFICATION.minCommentRatio
       ) {

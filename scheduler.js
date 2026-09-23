@@ -94,10 +94,37 @@ async function initDb() {
     ['ideal_price', 'NUMERIC'],
     ['last_posted_at', 'TEXT'],
     ['commission_score', 'NUMERIC'],
+    // video-specific data (free: same videos.list call, more parts)
+    ['channel_id', 'TEXT'],
+    ['median_views', 'NUMERIC'],
+    ['shorts_share', 'NUMERIC'],
+    ['latest_video_title', 'TEXT'],
+    ['latest_video_url', 'TEXT'],
+    ['latest_video_at', 'TEXT'],
+    ['top_video_title', 'TEXT'],
+    ['top_video_url', 'TEXT'],
+    ['videos_checked_at', 'TIMESTAMPTZ'],
+    // real contact tracking (downloads no longer count as "sent")
+    ['contact_status', 'TEXT'],
+    ['exported_at', 'TIMESTAMPTZ'],
+    ['contacted_at', 'TIMESTAMPTZ'],
+    ['contact_channel', 'TEXT'],
+    ['status_updated_at', 'TIMESTAMPTZ'],
+    ['notes', 'TEXT'],
+    // US audience share (%) from the creator's own analytics panel, entered by hand
+    ['us_share_verified', 'NUMERIC'],
   ];
   for (const [col, type] of newCols) {
     await p.query(`ALTER TABLE creators ADD COLUMN IF NOT EXISTS ${col} ${type}`).catch(() => {});
   }
+  // One-time migration: instantly_sent_at used to be set by any CSV/xlsx download, so we
+  // cannot tell which of these were really emailed. Label them and keep them off new lists.
+  await p.query(`
+    UPDATE creators SET contact_status = 'legacy-contacted', exported_at = instantly_sent_at,
+      status_updated_at = NOW()
+    WHERE instantly_sent_at IS NOT NULL AND contact_status IS NULL
+  `).then(r => { if (r.rowCount) log(`Migration: ${r.rowCount} rows labelled legacy-contacted`); })
+    .catch(e => log(`Migration error: ${e.message}`));
   await p.query(`CREATE TABLE IF NOT EXISTS seen_channels (channel_id TEXT PRIMARY KEY)`);
   await p.query(`CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT)`);
   log('Database ready');
@@ -116,8 +143,11 @@ async function saveCreator(row) {
       INSERT INTO creators
         (first_name,handle,email,avg_views,avg_likes,avg_comments,like_ratio,comment_ratio,
          subscriber_count,niche,channel_url,date_found,batch_number,video_count,total_views,
-         country,upload_frequency,thumbnail_url,ideal_price,last_posted_at,commission_score)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+         country,upload_frequency,thumbnail_url,ideal_price,last_posted_at,commission_score,
+         channel_id,median_views,shorts_share,latest_video_title,latest_video_url,latest_video_at,
+         top_video_title,top_video_url,videos_checked_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
+              $22,$23,$24,$25,$26,$27,$28,$29,NOW())
       ON CONFLICT (handle) DO UPDATE SET
         avg_views=EXCLUDED.avg_views, avg_likes=EXCLUDED.avg_likes,
         avg_comments=EXCLUDED.avg_comments, like_ratio=EXCLUDED.like_ratio,
@@ -127,12 +157,20 @@ async function saveCreator(row) {
         total_views=EXCLUDED.total_views, country=EXCLUDED.country,
         upload_frequency=EXCLUDED.upload_frequency, thumbnail_url=EXCLUDED.thumbnail_url,
         ideal_price=EXCLUDED.ideal_price, last_posted_at=EXCLUDED.last_posted_at,
-        commission_score=EXCLUDED.commission_score
+        commission_score=EXCLUDED.commission_score,
+        channel_id=COALESCE(EXCLUDED.channel_id, creators.channel_id),
+        median_views=EXCLUDED.median_views, shorts_share=EXCLUDED.shorts_share,
+        latest_video_title=EXCLUDED.latest_video_title, latest_video_url=EXCLUDED.latest_video_url,
+        latest_video_at=EXCLUDED.latest_video_at, top_video_title=EXCLUDED.top_video_title,
+        top_video_url=EXCLUDED.top_video_url, videos_checked_at=NOW()
     `, [row.first_name, row.handle, row.email, row.avg_views, row.avg_likes,
         row.avg_comments, row.like_ratio, row.comment_ratio, row.subscriber_count,
         row.niche, row.channel_url, row.date_found, row.batch_number,
         row.video_count, row.total_views, row.country, row.upload_frequency, row.thumbnail_url,
-        row.ideal_price, row.last_posted_at, row.commission_score]);
+        row.ideal_price, row.last_posted_at, row.commission_score,
+        row.channel_id || null, row.median_views ?? null, row.shorts_share ?? null,
+        row.latest_video_title || null, row.latest_video_url || null, row.latest_video_at || null,
+        row.top_video_title || null, row.top_video_url || null]);
     invalidateResultsCache();
   } catch (e) { log(`Save error ${row.handle}: ${e.message}`); }
 }
@@ -169,12 +207,13 @@ function invalidateResultsCache() { resultsCache = { rows: null, at: 0 }; }
 // (e.g. /api/results?limit=50) poison the cache for the next full download.
 async function getLastResults(limit = Infinity, { fresh = false } = {}) {
   const p = getPool();
-  if (!p) return limit === Infinity ? memoryResults.slice() : memoryResults.slice(-limit);
+  if (!p) return annotateRows(limit === Infinity ? memoryResults.slice() : memoryResults.slice(-limit));
   if (!fresh && resultsCache.rows && Date.now() - resultsCache.at < RESULTS_CACHE_TTL) {
     return resultsCache.rows.slice(0, limit);
   }
   try {
     const res = await p.query('SELECT * FROM creators ORDER BY batch_number ASC, id ASC');
+    annotateRows(res.rows);
     resultsCache = { rows: res.rows, at: Date.now() };
     return res.rows.slice(0, limit);
   } catch (e) { return []; }
@@ -710,6 +749,160 @@ function computeCommissionScore({ subscriberCount, commentRatio, likeRatio, emai
   return Math.min(100, Math.round(score));
 }
 
+// ─── VIDEO ANALYSIS ──────────────────────────────────────────────────────────
+// Works on a videos.list response requested with part 'snippet,statistics,contentDetails'.
+// videos.list costs 1 quota unit regardless of parts, so titles and durations are free.
+const SHORT_MAX_SECONDS = 180; // Shorts can run up to 3 minutes
+
+function isoDurationSeconds(iso = '') {
+  const m = /^P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(iso || '');
+  if (!m) return 0;
+  return (+m[1] || 0) * 86400 + (+m[2] || 0) * 3600 + (+m[3] || 0) * 60 + (+m[4] || 0);
+}
+
+function median(nums) {
+  if (!nums.length) return 0;
+  const s = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+function analyzeVideos(items = []) {
+  const vids = items.map(v => ({
+    id: v.id,
+    title: v.snippet?.title || '',
+    publishedAt: v.snippet?.publishedAt || '',
+    seconds: isoDurationSeconds(v.contentDetails?.duration),
+    views: parseInt(v.statistics?.viewCount || 0),
+    likes: parseInt(v.statistics?.likeCount || 0),
+    comments: parseInt(v.statistics?.commentCount || 0),
+  }));
+  if (!vids.length) return null;
+  const n = vids.length;
+  const sum = k => vids.reduce((s, v) => s + v[k], 0);
+  const avgViews = sum('views') / n;
+  const longForm = vids.filter(v => v.seconds > SHORT_MAX_SECONDS);
+  const byNewest = [...vids].sort((a, b) => String(b.publishedAt).localeCompare(String(a.publishedAt)));
+  const latest = byNewest[0];
+  // The video to reference in outreach: best-performing recent long-form upload, else the latest.
+  const top = [...(longForm.length ? longForm : vids)].sort((a, b) => b.views - a.views)[0];
+  const url = v => (v && v.id ? `https://www.youtube.com/watch?v=${v.id}` : null);
+  return {
+    avgViews,
+    avgLikes: sum('likes') / n,
+    avgComments: sum('comments') / n,
+    medianViews: median(vids.map(v => v.views)),
+    shortsShare: parseFloat(((n - longForm.length) / n).toFixed(2)),
+    latestTitle: latest?.title || null,
+    latestUrl: url(latest),
+    latestAt: latest?.publishedAt || null,
+    topTitle: top?.title || null,
+    topUrl: url(top),
+    titles: vids.map(v => v.title),
+  };
+}
+
+// ─── FIRE SCORE (v1) ─────────────────────────────────────────────────────────
+// 0-100, four 25-point parts. Computed on read, so tuning these constants never needs a
+// migration. Pre-deal, Economics is an estimate; it becomes real once post results exist.
+// US gate: channel country is self-declared, NOT audience geography. Only a verified share
+// (from the creator's own analytics panel, entered by hand) counts as verified.
+const FIRE = {
+  labelFire: 75, labelWatch: 60,           // >= 75 FIRE, 60-74 WATCH, < 60 CUT (CLAUDE.md)
+  minVerifiedUsShare: 50,                  // verified US share below this forces CUT
+  pillarWords: /anxiety|panic|depress|lonel|burnout|adhd|autis|neurodivergent|overthink|therapy|healing|grief|breakup|situationship|comfort|cozy|plush|trauma|chronic|spoonie|intrusive|nervous system|overstimulat|mental health/,
+  impactLikeFull: 0.06, impactCommentFull: 0.012,
+  reachGoodRatio: 0.2, reachOkRatio: 0.1, reachLowRatio: 0.05,
+  affordablePrice: 300, stretchPrice: 1000,
+};
+const FIRE_NICHES_ADJACENT = new Set(['cozy lifestyle', 'kawaii/plush', 'introvert lifestyle', 'journaling', 'self care']);
+
+function computeFire(r, extraText = '') {
+  const niche = r.niche || '';
+  const text = [r.top_video_title, r.latest_video_title, extraText].filter(Boolean).join(' ').toLowerCase();
+  const hits = (text.match(new RegExp(FIRE.pillarWords.source, 'g')) || []).length;
+  const F = (CAMPAIGN_NICHES.has(niche) ? 15 : FIRE_NICHES_ADJACENT.has(niche) ? 8 : 0) + Math.min(10, hits * 4);
+
+  const lr = Number(r.like_ratio) || 0, cr = Number(r.comment_ratio) || 0;
+  const I = Math.round(Math.min(1, lr / FIRE.impactLikeFull) * 13 + Math.min(1, cr / FIRE.impactCommentFull) * 12);
+
+  const subs = Number(r.subscriber_count) || 0;
+  const med = Number(r.median_views) || Number(r.avg_views) || 0;
+  const avg = Number(r.avg_views) || 0;
+  const ratio = subs > 0 ? med / subs : 0;
+  let R = ratio >= FIRE.reachGoodRatio ? 12 : ratio >= FIRE.reachOkRatio ? 8 : ratio >= FIRE.reachLowRatio ? 4 : 0;
+  const consistency = avg > 0 ? med / avg : 0;
+  R += consistency >= 0.6 ? 6 : consistency >= 0.4 ? 3 : 0;
+  const lastAt = r.latest_video_at || r.last_posted_at;
+  const days = lastAt ? (Date.now() - new Date(lastAt).getTime()) / 86400000 : Infinity;
+  R += days <= 30 ? 7 : days <= 90 ? 3 : 0;
+
+  const price = Number(r.ideal_price) || 0;
+  const E = Math.round((Number(r.commission_score) || 0) * 0.2)
+    + (price > 0 && price <= FIRE.affordablePrice ? 5 : price <= FIRE.stretchPrice ? 3 : 0);
+
+  const score = Math.max(0, Math.min(100, F + I + R + E));
+
+  const verified = r.us_share_verified !== null && r.us_share_verified !== undefined && r.us_share_verified !== '';
+  const usStatus = verified ? 'verified' : r.country === 'US' ? 'self-declared' : 'not-us-or-unknown';
+  let label = score >= FIRE.labelFire ? 'FIRE' : score >= FIRE.labelWatch ? 'WATCH' : 'CUT';
+  let gate = null;
+  if (verified && Number(r.us_share_verified) < FIRE.minVerifiedUsShare) { label = 'CUT'; gate = 'verified US share below 50%'; }
+  else if (usStatus === 'not-us-or-unknown') { label = 'CUT'; gate = 'channel not US'; }
+
+  return { fire_score: score, fire_label: label, fire_parts: { F, I, R, E }, us_status: usStatus, fire_gate: gate };
+}
+
+// Outreach opener that names a specific video (CLAUDE.md Critical Rule 2).
+// Creator-facing copy: changes go through /review first.
+// Rules approved by the marketing review team (2026-09-23): no title = no opener = no send;
+// crisis-topic titles are held for a person instead of being quoted in a cold email.
+const OPENER_MAX_TITLE = 70; // readability cap we chose, not a measured limit
+const OPENER_SAFETY_HOLD = /suicid|self[- ]?harm|kill(ing)? myself|overdos|cutting myself|relapse|crisis|psych ward|988/i;
+
+function cleanTitle(raw = '') {
+  let t = String(raw)
+    .replace(/"/g, "'")                   // keep the outer quotes intact
+    .replace(/\s+/g, ' ')                 // collapse spaces and line breaks
+    .trim()
+    .replace(/(\s*#[\p{L}\p{N}_]+)+$/u, '') // drop trailing hashtags
+    .trim();
+  if (t.length > OPENER_MAX_TITLE) {
+    const cut = t.slice(0, OPENER_MAX_TITLE);
+    const lastSpace = cut.lastIndexOf(' ');
+    t = (lastSpace > 20 ? cut.slice(0, lastSpace) : cut).replace(/[\s,.;:!?|/-]+$/, '') + '...';
+  }
+  return t; // capitalization and emoji left as the creator wrote them (keeps ADHD, OCD)
+}
+
+// Returns { opener, hold } where hold is null (sendable) or a reason to keep it off auto-send.
+function openerFor(r) {
+  const raw = r.top_video_title || r.latest_video_title || '';
+  if (OPENER_SAFETY_HOLD.test(raw)) return { opener: null, hold: 'safety: crisis topic in title, review by hand' };
+  const title = cleanTitle(raw);
+  if (!title) return { opener: null, hold: 'no video title yet (run backfill)' };
+  return { opener: `Your video "${title}" is the reason I'm writing.`, hold: null };
+}
+
+function buildOpener(r) { return openerFor(r).opener; }
+
+// Adds computed fields to rows read from the DB (mutates and returns rows).
+function annotateRows(rows) {
+  for (const r of rows) {
+    Object.assign(r, computeFire(r));
+    const o = openerFor(r);
+    r.opener = o.opener;
+    r.opener_hold = o.hold;
+    r.contact_status = r.contact_status || 'new';
+  }
+  return rows;
+}
+
+// Statuses that mean "do not put this creator on a new send list".
+const CONTACTED_STATUSES = new Set(['legacy-contacted', 'exported', 'queued', 'sent', 'replied', 'negotiating', 'deal', 'declined', 'bounced', 'do_not_contact']);
+const CONTACT_STATUSES = ['new', ...CONTACTED_STATUSES];
+function isContacted(r) { return CONTACTED_STATUSES.has(r.contact_status); }
+
 // ─── EMAIL EXTRACTION ─────────────────────────────────────────────────────────
 function extractEmail(text = '') {
   if (!text) return null;
@@ -989,18 +1182,18 @@ async function runBatch(km) {
 
       const mostRecentDate = plItems[0]?.contentDetails?.videoPublishedAt;
 
-      // Fetch video stats
+      // Fetch video stats + titles + durations (still 1 unit: videos.list cost ignores parts)
       const vidData = await ytGet('videos', {
-        part: 'statistics',
+        part: 'snippet,statistics,contentDetails',
         id: videoIds.join(','),
       }, km);
 
-      const stats = vidData?.items || [];
-      if (stats.length === 0) { await markSeenBatch([ch.id]); continue; }
+      const va = analyzeVideos(vidData?.items || []);
+      if (!va) { await markSeenBatch([ch.id]); continue; }
 
-      const avgViews    = stats.reduce((s, v) => s + parseInt(v.statistics?.viewCount   || 0), 0) / stats.length;
-      const avgLikes    = stats.reduce((s, v) => s + parseInt(v.statistics?.likeCount   || 0), 0) / stats.length;
-      const avgComments = stats.reduce((s, v) => s + parseInt(v.statistics?.commentCount|| 0), 0) / stats.length;
+      const avgViews    = va.avgViews;
+      const avgLikes    = va.avgLikes;
+      const avgComments = va.avgComments;
 
       const likeRatio    = avgViews > 0 ? avgLikes    / avgViews : 0;
       const commentRatio = avgViews > 0 ? avgComments / avgViews : 0;
@@ -1063,6 +1256,14 @@ async function runBatch(km) {
         ideal_price:       idealPrice,
         last_posted_at:    mostRecentDate || null,
         commission_score:  commissionScore,
+        channel_id:         ch.id,
+        median_views:       Math.round(va.medianViews),
+        shorts_share:       va.shortsShare,
+        latest_video_title: va.latestTitle,
+        latest_video_url:   va.latestUrl,
+        latest_video_at:    va.latestAt,
+        top_video_title:    va.topTitle,
+        top_video_url:      va.topUrl,
       };
 
       await saveCreator(creator);
@@ -1172,6 +1373,16 @@ const EXCEL_COLS = [
   { key: 'date_found', header: 'Date Found', width: 12 },
   { key: 'batch_number', header: 'Batch', width: 8 },
   { key: 'commission_score', header: 'Commission Score', width: 16 },
+  { key: 'fire_score', header: 'FIRE Score', width: 10 },
+  { key: 'fire_label', header: 'FIRE', width: 8 },
+  { key: 'us_status', header: 'US Status', width: 16 },
+  { key: 'us_share_verified', header: 'US % (verified)', width: 14 },
+  { key: 'contact_status', header: 'Contact Status', width: 16 },
+  { key: 'opener', header: 'OPENER', width: 60 },
+  { key: 'top_video_title', header: 'Video To Reference', width: 50 },
+  { key: 'top_video_url', header: 'Video URL', width: 45 },
+  { key: 'median_views', header: 'Median Views', width: 13 },
+  { key: 'shorts_share', header: 'Shorts Share', width: 12 },
   { key: 'vibe', header: 'VIBE', width: 18 },
   { key: 'praise', header: 'PRAISE', width: 55 },
   { key: 'looking_forward', header: 'LOOKING FORWARD', width: 55 },
@@ -1233,7 +1444,11 @@ async function executeBatch(keys) {
       XLSX.writeFile(wb, RESULTS_PATH);
     } catch (e) { log('Excel snapshot error: ' + e.message); }
 
-    enrichNewCreators().catch(e => log(`enrichNewCreators failed: ${e.message}`));
+    // Claude personalization is off by default: it wrote generic niche flattery (never a
+    // specific video) and costs credit. Video-specific openers are now built for free.
+    if (process.env.ENRICH_WITH_CLAUDE === 'true') {
+      enrichNewCreators().catch(e => log(`enrichNewCreators failed: ${e.message}`));
+    }
     return { success: true, found: creators.length };
   } catch (e) {
     log('executeBatch error: ' + e.message);
@@ -1318,7 +1533,10 @@ async function markInstantlySent(emails) {
   const p = getPool();
   if (!p) { emails.forEach(e => memoryInstantlySent.add(e)); return; }
   try {
-    await p.query(`UPDATE creators SET instantly_sent_at = NOW() WHERE email = ANY($1)`, [emails]);
+    // Added to an Instantly campaign = queued, not sent: the campaign still has to be launched there.
+    await p.query(`UPDATE creators SET instantly_sent_at = NOW(), contact_status = 'queued',
+      contact_channel = 'instantly', contacted_at = COALESCE(contacted_at, NOW()), status_updated_at = NOW()
+      WHERE email = ANY($1)`, [emails]);
     invalidateResultsCache();
   } catch (e) { log(`markInstantlySent error: ${e.message}`); }
 }
@@ -1334,7 +1552,9 @@ async function resetSentLast2Days() {
   }
   try {
     const result = await p.query(
-      `UPDATE creators SET instantly_sent_at = NULL WHERE date_found >= $1 AND instantly_sent_at IS NOT NULL`,
+      `UPDATE creators SET instantly_sent_at = NULL,
+         contact_status = CASE WHEN contact_status IN ('legacy-contacted','exported','queued') THEN NULL ELSE contact_status END
+       WHERE date_found >= $1 AND instantly_sent_at IS NOT NULL`,
       [cutoff]
     );
     log(`resetSentLast2Days: cleared ${result.rowCount} creators`);
@@ -1404,12 +1624,17 @@ async function enrichNewCreators() {
 
 async function pushToInstantly(creators, apiKey, batchLabel) {
   // Split already-sent from fresh
-  const alreadySent = creators.filter(c => c.instantly_sent_at || memoryInstantlySent.has(c.email));
-  const fresh = creators.filter(c => !c.instantly_sent_at && !memoryInstantlySent.has(c.email));
-  const withEmail = fresh.filter(c => c.email && c.email.trim());
+  const alreadySent = creators.filter(c => isContacted(c) || memoryInstantlySent.has(c.email));
+  const fresh = creators.filter(c => !isContacted(c) && !memoryInstantlySent.has(c.email));
+  const emailable = fresh.filter(c => c.email && c.email.trim());
+  // Send rule (Critical Rule 2): no specific-video opener, no send. Held leads stay 'new'
+  // and show on the dashboard with their hold reason for manual review.
+  const held = emailable.filter(c => !c.opener || c.opener_hold);
+  const withEmail = emailable.filter(c => c.opener && !c.opener_hold);
+  if (held.length) log(`Instantly push: holding ${held.length} leads without a sendable opener (no title or safety hold)`);
 
   if (withEmail.length === 0) {
-    return { sent: 0, skipped: fresh.length, alreadySent: alreadySent.length, failed: 0, campaignName: null };
+    return { sent: 0, skipped: fresh.length - emailable.length, held: held.length, alreadySent: alreadySent.length, failed: 0, campaignName: null };
   }
 
   // Create a new campaign for this push
@@ -1430,13 +1655,16 @@ async function pushToInstantly(creators, apiKey, batchLabel) {
   const leads = withEmail.map(c => ({
     email: c.email.trim(),
     firstName: c.first_name || '',
-    personalization: c.niche ? `Love your ${c.niche} content` : '',
+    personalization: c.opener,
     custom_variables: {
       channel_url: c.channel_url || '',
       niche: c.niche || '',
       subscribers: String(c.subscriber_count || ''),
       avg_views: String(Math.round(c.avg_views || 0)),
       handle: c.handle || '',
+      top_video_title: c.top_video_title || c.latest_video_title || '',
+      top_video_url: c.top_video_url || c.latest_video_url || '',
+      fire_score: String(c.fire_score ?? ''),
     },
   }));
 
@@ -1471,7 +1699,7 @@ async function pushToInstantly(creators, apiKey, batchLabel) {
   await markInstantlySent(sentEmails);
 
   log(`Instantly push complete: ${sent} sent, ${alreadySent.length} already sent, ${fresh.length - withEmail.length} skipped (no email), ${failed} failed`);
-  return { sent, skipped: fresh.length - withEmail.length, alreadySent: alreadySent.length, failed, campaignName };
+  return { sent, skipped: fresh.length - emailable.length, held: held.length, alreadySent: alreadySent.length, failed, campaignName };
 }
 
 // ─── SINGLE CREATOR LOOKUP ───────────────────────────────────────────────────
@@ -1567,6 +1795,104 @@ async function lookupCreator(input) {
   };
 }
 
+// ─── CONTACT STATUS ──────────────────────────────────────────────────────────
+// The only way a creator becomes "contacted". Downloads never change status.
+async function setContactStatus(handles, status, { channel = null, notes = null, usShare } = {}) {
+  if (!Array.isArray(handles) || !handles.length) throw new Error('handles required');
+  if (!CONTACT_STATUSES.includes(status)) throw new Error(`status must be one of: ${CONTACT_STATUSES.join(', ')}`);
+  const p = getPool();
+  const dbStatus = status === 'new' ? null : status;
+  const touches = ['sent', 'queued', 'replied', 'negotiating', 'deal', 'declined'].includes(status);
+  if (!p) {
+    memoryResults.filter(r => handles.includes(r.handle)).forEach(r => {
+      r.contact_status = dbStatus; if (channel) r.contact_channel = channel; if (notes) r.notes = notes;
+      if (usShare !== undefined) r.us_share_verified = usShare;
+    });
+    return memoryResults.filter(r => handles.includes(r.handle)).length;
+  }
+  const res = await p.query(`
+    UPDATE creators SET
+      contact_status = $2,
+      contact_channel = COALESCE($3, contact_channel),
+      notes = COALESCE($4, notes),
+      contacted_at = CASE WHEN $5 THEN COALESCE(contacted_at, NOW()) ELSE contacted_at END,
+      us_share_verified = CASE WHEN $6 THEN $7::numeric ELSE us_share_verified END,
+      status_updated_at = NOW()
+    WHERE handle = ANY($1)`,
+    [handles, dbStatus, channel, notes, touches, usShare !== undefined, usShare ?? null]);
+  invalidateResultsCache();
+  log(`setContactStatus: ${res.rowCount} creators -> ${status}`);
+  return res.rowCount;
+}
+
+// ─── VIDEO BACKFILL ──────────────────────────────────────────────────────────
+// Adds video titles/urls, median views and Shorts share to rows saved before they existed.
+// Cost per creator: channels.list (1, only when the channel id is unknown) + playlistItems (1)
+// + videos (1). Free quota, but it shares the daily budget with the batch, so it is chunked.
+let backfillRunning = false;
+async function backfillVideos({ limit = 500, campaignOnly = true } = {}) {
+  if (backfillRunning) return { started: false, message: 'Backfill already running' };
+  if (batchRunning) return { started: false, message: 'A discovery batch is running, try again after it finishes' };
+  const p = getPool();
+  if (!p) return { started: false, message: 'No database' };
+  const keys = getApiKeys();
+  if (!keys.length) return { started: false, message: 'No API keys' };
+
+  const all = await getLastResults(Infinity, { fresh: true });
+  let rows = all.filter(r => !r.videos_checked_at);
+  if (campaignOnly) rows = rows.filter(isCampaignCreator);
+  rows.sort((a, b) => (b.commission_score || 0) - (a.commission_score || 0));
+  rows = rows.slice(0, Math.max(1, Math.min(Number(limit) || 500, 3000)));
+
+  backfillRunning = true;
+  (async () => {
+    const km = new KeyManager(keys);
+    let done = 0, failed = 0;
+    log(`backfillVideos: starting ${rows.length} creators (campaignOnly=${campaignOnly})`);
+    for (const r of rows) {
+      if (!km.hasKeys()) { log('backfillVideos: keys exhausted, stopping'); break; }
+      try {
+        let channelId = r.channel_id || (String(r.handle).startsWith('channel/') ? r.handle.slice(8) : null);
+        if (!channelId) {
+          const h = String(r.handle).startsWith('@') ? r.handle : '@' + r.handle;
+          const cd = await ytGet('channels', { part: 'id', forHandle: h }, km);
+          channelId = cd?.items?.[0]?.id || null;
+        }
+        if (!channelId || !channelId.startsWith('UC')) { failed++; continue; }
+        const pl = await ytGet('playlistItems', { part: 'contentDetails', playlistId: 'UU' + channelId.slice(2), maxResults: 10 }, km);
+        const ids = (pl?.items || []).map(i => i.contentDetails?.videoId).filter(Boolean);
+        if (!ids.length) { failed++; continue; }
+        const vd = await ytGet('videos', { part: 'snippet,statistics,contentDetails', id: ids.join(',') }, km);
+        const va = analyzeVideos(vd?.items || []);
+        if (!va) { failed++; continue; }
+        await p.query(`UPDATE creators SET channel_id = $2, median_views = $3, shorts_share = $4,
+            latest_video_title = $5, latest_video_url = $6, latest_video_at = $7,
+            top_video_title = $8, top_video_url = $9, videos_checked_at = NOW()
+          WHERE handle = $1`,
+          [r.handle, channelId, Math.round(va.medianViews), va.shortsShare, va.latestTitle, va.latestUrl,
+           va.latestAt, va.topTitle, va.topUrl]);
+        done++;
+        if (done % 50 === 0) log(`backfillVideos: ${done}/${rows.length}`);
+      } catch (e) {
+        if (e.message === 'ALL_KEYS_EXHAUSTED') { log('backfillVideos: keys exhausted, stopping'); break; }
+        failed++;
+      }
+      await sleep(120);
+    }
+    invalidateResultsCache();
+    log(`backfillVideos: done. updated ${done}, failed ${failed}, of ${rows.length}`);
+  })().catch(e => log(`backfillVideos error: ${e.message}`)).finally(() => { backfillRunning = false; });
+
+  return { started: true, queued: rows.length };
+}
+
+// Ranked by FIRE first, then the older engagement/views percentile score.
+function sortByFire(rows) {
+  computeBestScores(rows);
+  return [...rows].sort((a, b) =>
+    ((b.fire_score || 0) - (a.fire_score || 0)) || (b.best_score - a.best_score));
+}
+
 module.exports = {
   startScheduler, executeBatch, getState, getLastResults, generateExcel,
   initDb, RESULTS_PATH, getApiKeys, getLogs, pushToInstantly,
@@ -1574,4 +1900,5 @@ module.exports = {
   generatePersonalization, enrichNewCreators, enrichBatch, resetEnrichment,
   lookupCreator, sortByBest, computeBestScores, generateRankedWorkbook,
   isCampaignCreator, CAMPAIGN_TARGET: TARGET,
+  setContactStatus, backfillVideos, sortByFire, isContacted, CONTACT_STATUSES, computeFire, buildOpener,
 };

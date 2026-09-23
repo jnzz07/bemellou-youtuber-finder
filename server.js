@@ -13,6 +13,7 @@ const {
   generatePersonalization, enrichNewCreators, enrichBatch, resetEnrichment,
   lookupCreator, sortByBest, generateRankedWorkbook,
   isCampaignCreator, CAMPAIGN_TARGET,
+  setContactStatus, backfillVideos, sortByFire, isContacted, CONTACT_STATUSES,
 } = require('./scheduler');
 
 const app = express();
@@ -105,12 +106,16 @@ app.get('/api/results/all', async (req, res) => {
 app.get('/api/results/meta', async (req, res) => {
   try {
     const rows = await getLastResults(Infinity);
-    let maxId = 0, sentCount = 0;
+    let maxId = 0, sentCount = 0, lastStatusAt = '';
+    const byStatus = {};
     for (const r of rows) {
       if (r.id > maxId) maxId = r.id;
-      if (r.instantly_sent_at) sentCount++;
+      if (isContacted(r)) sentCount++;
+      byStatus[r.contact_status] = (byStatus[r.contact_status] || 0) + 1;
+      const t = r.status_updated_at ? new Date(r.status_updated_at).toISOString() : '';
+      if (t > lastStatusAt) lastStatusAt = t;
     }
-    res.json({ count: rows.length, maxId, sentCount });
+    res.json({ count: rows.length, maxId, sentCount, byStatus, lastStatusAt });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -118,8 +123,9 @@ app.get('/api/results/meta', async (req, res) => {
 app.get('/api/download', async (req, res) => {
   try {
     const all = await getLastResults(Infinity, { fresh: true });
-    // Exclude creators with email that have already been downloaded
-    let rows = all.filter(r => !(r.email && r.email !== 'Not listed' && r.instantly_sent_at));
+    // New leads only: never-contacted creators. Downloading does NOT mark anyone; use
+    // POST /api/creators/status (dashboard "Mark as sent") once emails actually go out.
+    let rows = all.filter(r => !isContacted(r));
     if (req.query.campaign === 'true') rows = rows.filter(isCampaignCreator);
     if (req.query.hasEmail === 'true') rows = rows.filter(r => r.email && r.email !== 'Not listed');
     if (rows.length === 0) return res.status(404).json({ error: 'No new results to download' });
@@ -129,8 +135,6 @@ app.get('/api/download', async (req, res) => {
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="bemellou-creators-${Date.now()}.xlsx"`);
     res.send(buf);
-    const emails = rows.map(r => r.email).filter(Boolean);
-    markInstantlySent(emails).catch(() => {});
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -139,8 +143,8 @@ app.get('/api/download/csv', async (req, res) => {
     const batch = req.query.batch;
     const all = await getLastResults(Infinity, { fresh: true });
     let data = batch ? all.filter(r => String(r.batch_number) === String(batch)) : all;
-    // Exclude creators with email that have already been downloaded
-    data = data.filter(r => !(r.email && r.email !== 'Not listed' && r.instantly_sent_at));
+    // New leads only (never contacted). Read-only: see /api/creators/status.
+    data = data.filter(r => !isContacted(r));
     if (req.query.campaign === 'true') data = data.filter(isCampaignCreator);
     if (req.query.hasEmail === 'true') data = data.filter(r => r.email && r.email !== 'Not listed');
     if (data.length === 0) return res.status(404).json({ error: 'No new results found' });
@@ -150,6 +154,8 @@ app.get('/api/download/csv', async (req, res) => {
       'avg_views', 'avg_likes', 'avg_comments', 'like_ratio', 'comment_ratio',
       'country', 'upload_frequency', 'total_views', 'video_count',
       'channel_url', 'thumbnail_url', 'date_found', 'batch_number',
+      'fire_score', 'fire_label', 'us_status', 'contact_status',
+      'opener', 'top_video_title', 'top_video_url', 'median_views', 'shorts_share',
       'vibe', 'praise', 'looking_forward',
     ];
     const headers = [
@@ -157,6 +163,8 @@ app.get('/api/download/csv', async (req, res) => {
       'Avg Views', 'Avg Likes', 'Avg Comments', 'Like Ratio', 'Comment Ratio',
       'Country', 'Uploads/Mo', 'Total Views', 'Video Count',
       'Channel URL', 'Thumbnail URL', 'Date Found', 'Batch',
+      'FIRE Score', 'FIRE', 'US Status', 'Contact Status',
+      'Opener', 'Video To Reference', 'Video URL', 'Median Views', 'Shorts Share',
       'VIBE', 'PRAISE', 'LOOKING FORWARD',
     ];
 
@@ -176,13 +184,11 @@ app.get('/api/download/csv', async (req, res) => {
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(csv);
-    const emails = data.map(r => r.email).filter(Boolean);
-    markInstantlySent(emails).catch(() => {});
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ─── RANKED TOP-N DOWNLOAD ───────────────────────────────────────────────────
-// Best creators first (avg views 50%, like ratio 25%, comment ratio 25%),
+// Best creators first: FIRE score, then (avg views 50%, like ratio 25%, comment ratio 25%),
 // separated into Has Email / No Email. Does NOT mark anyone as sent.
 const hasEmail = r => r.email && r.email !== 'Not listed';
 
@@ -193,8 +199,9 @@ app.get('/api/download/top', async (req, res) => {
     let rows = await getLastResults(Infinity, { fresh: true });
     if (req.query.email === 'has') rows = rows.filter(hasEmail);
     if (req.query.email === 'none') rows = rows.filter(r => !hasEmail(r));
-    if (req.query.excludeSent === 'true') rows = rows.filter(r => !r.instantly_sent_at);
-    rows = sortByBest(rows);
+    if (req.query.excludeSent === 'true') rows = rows.filter(r => !isContacted(r));
+    if (req.query.fire) rows = rows.filter(r => String(req.query.fire).toUpperCase().split(',').includes(r.fire_label));
+    rows = sortByFire(rows);
     if (count > 0) rows = rows.slice(0, count);
     if (!rows.length) return res.status(404).json({ error: 'No creators match' });
     rows.forEach((r, i) => { r.rank = i + 1; });
@@ -217,16 +224,18 @@ app.get('/api/download/top', async (req, res) => {
 
     // CSV: Has Email rows first, then No Email, with Rank + Best Score + Has Email columns
     const cols = [
-      'rank', 'best_score', 'has_email', 'first_name', 'handle', 'email', 'niche',
+      'rank', 'fire_score', 'fire_label', 'best_score', 'has_email', 'first_name', 'handle', 'email', 'niche',
       'subscriber_count', 'avg_views', 'avg_likes', 'avg_comments', 'like_ratio',
       'comment_ratio', 'country', 'upload_frequency', 'total_views', 'video_count',
       'channel_url', 'date_found', 'batch_number',
+      'us_status', 'contact_status', 'opener', 'top_video_title', 'top_video_url', 'median_views',
     ];
     const headers = [
-      'Rank', 'Best Score', 'Has Email', 'Name', 'Handle', 'Email', 'Niche',
+      'Rank', 'FIRE Score', 'FIRE', 'Best Score', 'Has Email', 'Name', 'Handle', 'Email', 'Niche',
       'Subscribers', 'Avg Views', 'Avg Likes', 'Avg Comments', 'Like Ratio',
       'Comment Ratio', 'Country', 'Uploads/Mo', 'Total Views', 'Video Count',
       'Channel URL', 'Date Found', 'Batch',
+      'US Status', 'Contact Status', 'Opener', 'Video To Reference', 'Video URL', 'Median Views',
     ];
     const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const toLine = r => cols.map(c => {
@@ -310,6 +319,44 @@ app.post('/api/batches/:batch/toggle-manual-sent', async (req, res) => {
   try {
     const isSent = await toggleManualSent(batch);
     res.json({ batchNumber: batch, manuallySent: isSent });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── CONTACT STATUS ──────────────────────────────────────────────────────────
+// Body: { handles: [...], status, channel?, notes?, usShare? }
+//   or  { filter: { campaign?, batch?, onlyNew?, hasEmail? }, status, ... } to mark a whole list
+app.post('/api/creators/status', async (req, res) => {
+  try {
+    const { handles, filter, status, channel, notes, usShare } = req.body || {};
+    if (!CONTACT_STATUSES.includes(status)) return res.status(400).json({ error: `status must be one of: ${CONTACT_STATUSES.join(', ')}` });
+    let list = Array.isArray(handles) ? handles.filter(Boolean) : [];
+    if (!list.length && filter && typeof filter === 'object') {
+      let rows = await getLastResults(Infinity, { fresh: true });
+      if (filter.batch) rows = rows.filter(r => String(r.batch_number) === String(filter.batch));
+      if (filter.campaign) rows = rows.filter(isCampaignCreator);
+      if (filter.hasEmail) rows = rows.filter(r => r.email && r.email !== 'Not listed');
+      if (filter.onlyNew) rows = rows.filter(r => !isContacted(r));
+      list = rows.map(r => r.handle);
+    }
+    if (!list.length) return res.status(400).json({ error: 'No creators matched: pass handles or a filter' });
+    if (list.length > 5000) return res.status(400).json({ error: 'Refusing to update more than 5000 creators at once' });
+    let share;
+    if (usShare !== undefined && usShare !== null && usShare !== '') {
+      share = Number(usShare);
+      if (!(share >= 0 && share <= 100)) return res.status(400).json({ error: 'usShare must be 0-100' });
+    }
+    const updated = await setContactStatus(list, status, { channel: channel || null, notes: notes || null, usShare: share });
+    res.json({ ok: true, updated, status });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── VIDEO BACKFILL ──────────────────────────────────────────────────────────
+// Body: { limit?: 500, campaignOnly?: true }. Runs in the background; progress in /api/logs.
+app.post('/api/backfill/videos', async (req, res) => {
+  try {
+    const { limit = 500, campaignOnly = true } = req.body || {};
+    const result = await backfillVideos({ limit, campaignOnly: campaignOnly !== false && campaignOnly !== 'false' });
+    res.status(result.started ? 202 : 409).json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

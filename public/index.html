@@ -116,6 +116,15 @@ body{font-family:'Inter',sans-serif;background:#0f0f0f;color:#f0f0f0;display:fle
 .country-tag{font-size:10px;color:#666;background:#1a1a1a;padding:2px 7px;border-radius:99px;border:1px solid #222}
 .sent-tag{background:#052e16;color:#4ade80;font-size:10px;padding:2px 9px;border-radius:99px;border:1px solid #166534;font-weight:700;letter-spacing:.04em}
 .card.sent{border-color:#166534;opacity:.8}
+.fire-tag{font-size:10px;padding:2px 9px;border-radius:99px;font-weight:700;letter-spacing:.04em;border:1px solid}
+.fire-tag.FIRE{background:#2a1405;color:#fb923c;border-color:#7c2d12}
+.fire-tag.WATCH{background:#2a2a0a;color:#facc15;border-color:#713f12}
+.fire-tag.CUT{background:#1a1a1a;color:#777;border-color:#333}
+.opener-row{margin-top:8px;font-size:12px;color:#bbb;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.opener-row a{color:#60a5fa;text-decoration:none}
+.opener-copy{cursor:pointer;border:1px dashed #333;border-radius:6px;padding:3px 8px;color:#ddd}
+.opener-copy:hover{border-color:#666}
+.status-select{background:#111;color:#ddd;border:1px solid #333;border-radius:6px;font-size:11px;padding:3px 6px}
 .card.sent .avatar{border-color:#166534}
 .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-bottom:8px}
 @media(max-width:900px){.metrics{grid-template-columns:repeat(3,1fr)}}
@@ -316,18 +325,23 @@ body{font-family:'Inter',sans-serif;background:#0f0f0f;color:#f0f0f0;display:fle
             <option value="1000">Top 1000</option>
             <option value="0">All creators (ranked)</option>
           </select>
-          <label class="dl-check"><input type="checkbox" id="dl-exclude-sent"/> Skip already-emailed creators</label>
+          <label class="dl-check"><input type="checkbox" id="dl-exclude-sent"/> Skip already-contacted creators</label>
+          <label class="dl-check"><input type="checkbox" id="dl-fire-only"/> FIRE + WATCH only (score 60+)</label>
           <div class="dl-btns">
             <button class="btn btn-green" onclick="downloadTop('xlsx')">↓ Excel</button>
             <button class="btn" onclick="downloadTop('csv')">↓ CSV</button>
           </div>
-          <div class="dl-note">Ranked best → worst by avg views + like &amp; comment ratios. Excel has separate "Has Email" / "No Email" sheets; CSV groups emails first. Follows the Email filter.</div>
+          <div class="dl-note">Ranked by FIRE score (0-100), then views + like &amp; comment ratios. Excel has separate "Has Email" / "No Email" sheets; CSV groups emails first. Follows the Email filter.</div>
           <div class="dl-sep"></div>
-          <div class="dl-menu-title muted">New leads only (marks as downloaded)</div>
+          <div class="dl-menu-title muted">New leads only (never contacted, downloading does not mark them)</div>
           <div class="dl-btns">
             <a id="dl-csv" href="/api/download/csv" class="btn">↓ CSV</a>
             <a id="dl-excel" href="/api/download" class="btn">↓ Excel</a>
           </div>
+          <div class="dl-btns">
+            <button class="btn" onclick="markNewAsSent()">✓ Mark new leads with email as sent</button>
+          </div>
+          <div class="dl-note">Only click this once the emails have actually gone out. It follows the current view (Campaign or batch).</div>
         </div>
       </div>
       <button class="btn btn-green" id="instantly-btn" onclick="pushToInstantly()">⚡ Send to Instantly</button>
@@ -337,6 +351,7 @@ body{font-family:'Inter',sans-serif;background:#0f0f0f;color:#f0f0f0;display:fle
 
   <div class="filterbar">
     <span class="filter-label">Sort</span>
+    <button class="sort-btn" onclick="setSort('fire')" id="sort-fire" style="border-color:#7c2d12;color:#fb923c">🔥 FIRE</button>
     <button class="sort-btn" onclick="setSort('best')" id="sort-best" style="border-color:#3d2a10;color:#fbbf24">🏆 Best</button>
     <button class="sort-btn active" onclick="setSort('date')" id="sort-date">Date</button>
     <button class="sort-btn" onclick="setSort('views')" id="sort-views">Avg Views</button>
@@ -482,6 +497,7 @@ function downloadTop(format) {
   const params = new URLSearchParams({ format });
   if (Number(count) > 0) params.set('count', count);
   if (excludeSent) params.set('excludeSent', 'true');
+  if (document.getElementById('dl-fire-only').checked) params.set('fire', 'FIRE,WATCH');
   if (emailFilter === 'has') params.set('email', 'has');
   if (emailFilter === 'none') params.set('email', 'none');
   window.location.href = '/api/download/top?' + params.toString();
@@ -598,7 +614,8 @@ function getSortedFiltered() {
   if (emailFilter === 'has') filtered = filtered.filter(r => r.email && r.email !== 'Not listed');
   if (emailFilter === 'none') filtered = filtered.filter(r => !r.email || r.email === 'Not listed');
   filtered = [...filtered];
-  if (sortBy === 'best') filtered.sort((a, b) => (Number(b.best_score || 0) - Number(a.best_score || 0)) || (Number(b.avg_views || 0) - Number(a.avg_views || 0)));
+  if (sortBy === 'fire') filtered.sort((a, b) => (Number(b.fire_score || 0) - Number(a.fire_score || 0)) || (Number(b.best_score || 0) - Number(a.best_score || 0)));
+  else if (sortBy === 'best') filtered.sort((a, b) => (Number(b.best_score || 0) - Number(a.best_score || 0)) || (Number(b.avg_views || 0) - Number(a.avg_views || 0)));
   else if (sortBy === 'views') filtered.sort((a, b) => Number(b.avg_views || 0) - Number(a.avg_views || 0));
   else if (sortBy === 'subs') filtered.sort((a, b) => Number(b.subscriber_count || 0) - Number(a.subscriber_count || 0));
   else if (sortBy === 'like') filtered.sort((a, b) => Number(b.like_ratio || 0) - Number(a.like_ratio || 0));
@@ -695,7 +712,8 @@ function buildCard(r) {
       ? `<img src="${thumb}" alt="${name}" loading="lazy" onerror="this.style.display='none';this.parentElement.textContent='${initials(name)}'">`
       : initials(name);
 
-    const isSent = !!r.instantly_sent_at;
+    const status = r.contact_status || 'new';
+    const isSent = status !== 'new';
     return `<div class="card${isSent ? ' sent' : ''}">
       <div class="avatar">${avatarContent}</div>
       <div class="info">
@@ -705,7 +723,8 @@ function buildCard(r) {
           ${niche ? `<span class="niche-tag">${escHtml(niche)}</span>` : ''}
           ${activeBatch === 'all' && bnum ? `<span class="batch-tag">Batch ${bnum}</span>` : ''}
           ${country ? `<span class="country-tag">${escHtml(country)}</span>` : ''}
-          ${isSent ? `<span class="sent-tag">✓ SENT</span>` : ''}
+          ${r.fire_label ? `<span class="fire-tag ${r.fire_label}" title="F${r.fire_parts?.F ?? '?'} I${r.fire_parts?.I ?? '?'} R${r.fire_parts?.R ?? '?'} E${r.fire_parts?.E ?? '?'}${r.fire_gate ? ' · ' + escAttr(r.fire_gate) : ''} · US: ${escAttr(r.us_status || '')}">🔥 ${r.fire_label} ${r.fire_score ?? ''}</span>` : ''}
+          ${isSent ? `<span class="sent-tag">✓ ${escHtml(status.toUpperCase())}</span>` : ''}
         </div>
         <div class="metrics">
           ${r.best_score != null ? `<div class="metric${sortBy === 'best' ? ' highlight' : ''}" style="border-color:#3d2a10"><div class="ml" style="color:#fbbf24">🏆 Best score</div><div class="mv" style="color:#fbbf24">${r.best_score}/100</div></div>` : ''}
@@ -727,7 +746,12 @@ function buildCard(r) {
             : `<span class="email-tag no-email">No email listed</span>`}
           ${url ? `<a class="ytlink" href="${escAttr(url)}" target="_blank" rel="noopener">▶ Channel</a>` : ''}
           ${date ? `<span class="date-lbl">${date}</span>` : ''}
+          <select class="status-select" onchange="setStatus('${escAttr(handle)}', this.value, this)" title="Contact status">
+            ${CONTACT_STATUSES.map(st => `<option value="${st}"${st === status ? ' selected' : ''}>${st}</option>`).join('')}
+          </select>
         </div>
+        ${!r.opener && r.opener_hold ? `<div class="opener-row"><span class="opener-copy" style="border-color:#713f12;color:#facc15">⏸ Not auto-sent: ${escHtml(r.opener_hold)}</span></div>` : ''}
+        ${r.opener ? `<div class="opener-row"><span class="opener-copy" title="Click to copy" onclick="copyText(${escAttr(JSON.stringify(r.opener))}, this)">💬 ${escHtml(r.opener)}</span>${r.top_video_url ? `<a href="${escAttr(r.top_video_url)}" target="_blank" rel="noopener">▶ watch it first</a>` : ''}</div>` : ''}
       </div>
     </div>`;
 }
@@ -840,8 +864,43 @@ async function fetchLogs() {
 }
 
 let lastMetaSig = '';
+const CONTACT_STATUSES = ['new', 'legacy-contacted', 'exported', 'queued', 'sent', 'replied', 'negotiating', 'deal', 'declined', 'bounced', 'do_not_contact'];
 
-function metaSig(count, maxId, sentCount) { return count + '|' + maxId + '|' + sentCount; }
+function metaSig(count, maxId, sentCount, lastStatusAt) { return count + '|' + maxId + '|' + sentCount + '|' + (lastStatusAt || ''); }
+
+async function postStatus(body) {
+  const r = await fetch('/api/creators/status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+  return d;
+}
+
+async function setStatus(handle, status, el) {
+  try {
+    const d = await postStatus({ handles: [handle], status });
+    const row = allResults.find(x => x.handle === handle);
+    if (row) { row.contact_status = status; row.status_updated_at = new Date().toISOString(); }
+    showToast(`${handle} → ${status}`);
+    renderCards();
+  } catch (e) { showToast('Status error: ' + e.message, 4000); if (el) el.blur(); }
+}
+
+async function markNewAsSent() {
+  const filter = { onlyNew: true, hasEmail: true };
+  if (activeBatch === 'campaign') filter.campaign = true;
+  else if (activeBatch !== 'all') filter.batch = activeBatch;
+  const n = getSortedFiltered().filter(r => (r.contact_status || 'new') === 'new' && r.email && r.email !== 'Not listed').length;
+  if (!confirm(`Mark ${n} never-contacted creators with email in this view as SENT? Only do this after the emails actually went out.`)) return;
+  try {
+    const d = await postStatus({ filter, status: 'sent', channel: 'manual' });
+    showToast(`Marked ${d.updated} as sent`, 3000);
+    await fetchResults();
+  } catch (e) { showToast('Error: ' + e.message, 4000); }
+}
+
+function copyText(text, el) {
+  navigator.clipboard.writeText(text).then(() => showToast('Opener copied')).catch(() => showToast('Copy failed'));
+}
 
 async function fetchResults() {
   try {
@@ -850,16 +909,18 @@ async function fetchResults() {
     if (!Array.isArray(d)) return;
     allResults = d;
     computeBestScores(allResults);
-    let maxId = 0, sentCount = 0;
+    let maxId = 0, sentCount = 0, lastStatusAt = '';
     batches = {};
     d.forEach(r => {
       const b = r.batch_number || 1;
       if (!batches[b]) batches[b] = [];
       batches[b].push(r);
       if (r.id > maxId) maxId = r.id;
-      if (r.instantly_sent_at) sentCount++;
+      if (r.contact_status && r.contact_status !== 'new') sentCount++;
+      const t = r.status_updated_at ? new Date(r.status_updated_at).toISOString() : '';
+      if (t > lastStatusAt) lastStatusAt = t;
     });
-    lastMetaSig = metaSig(d.length, maxId, sentCount);
+    lastMetaSig = metaSig(d.length, maxId, sentCount, lastStatusAt);
     buildSidebar();
     renderCards();
   } catch (e) {}
@@ -871,7 +932,7 @@ async function checkForNewResults() {
   try {
     const r = await fetch('/api/results/meta');
     const d = await r.json();
-    if (d && typeof d.count === 'number' && metaSig(d.count, d.maxId, d.sentCount) !== lastMetaSig) {
+    if (d && typeof d.count === 'number' && metaSig(d.count, d.maxId, d.sentCount, d.lastStatusAt) !== lastMetaSig) {
       await fetchResults();
     }
   } catch (e) {}
@@ -914,7 +975,7 @@ async function pushToInstantly() {
     if (!r.ok) {
       showToast('Instantly error: ' + (d.error || 'Unknown'), 5000);
     } else {
-      showToast(`✓ ${d.sent} leads → "${d.campaignName}". Already sent: ${d.alreadySent}. Skipped: ${d.skipped} (no email). Failed: ${d.failed}`);
+      showToast(`✓ ${d.sent} leads → "${d.campaignName}". Already sent: ${d.alreadySent}. Skipped: ${d.skipped} (no email). Held for review (no video or safety): ${d.held || 0}. Failed: ${d.failed}`, 6000);
     }
   } catch (e) {
     showToast('Error: ' + e.message, 4000);

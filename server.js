@@ -35,7 +35,7 @@ app.get('/api/status', async (req, res) => {
   const keys = getApiKeys();
   let campaignCount = 0;
   try {
-    const all = await getLastResults(10000);
+    const all = await getLastResults(Infinity);
     campaignCount = all.filter(isCampaignCreator).length;
   } catch (e) { /* status must never fail on the campaign count */ }
   res.json({
@@ -96,7 +96,7 @@ app.get('/api/results', async (req, res) => {
 
 app.get('/api/results/all', async (req, res) => {
   try {
-    const results = await getLastResults(10000);
+    const results = await getLastResults(Infinity);
     res.json(results);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -104,7 +104,7 @@ app.get('/api/results/all', async (req, res) => {
 // Lightweight change signature — lets the UI skip re-downloading the full list
 app.get('/api/results/meta', async (req, res) => {
   try {
-    const rows = await getLastResults(10000);
+    const rows = await getLastResults(Infinity);
     let maxId = 0, sentCount = 0;
     for (const r of rows) {
       if (r.id > maxId) maxId = r.id;
@@ -117,7 +117,7 @@ app.get('/api/results/meta', async (req, res) => {
 // ─── DOWNLOADS ───────────────────────────────────────────────────────────────
 app.get('/api/download', async (req, res) => {
   try {
-    const all = await getLastResults(10000, { fresh: true });
+    const all = await getLastResults(Infinity, { fresh: true });
     // Exclude creators with email that have already been downloaded
     let rows = all.filter(r => !(r.email && r.email !== 'Not listed' && r.instantly_sent_at));
     if (req.query.campaign === 'true') rows = rows.filter(isCampaignCreator);
@@ -137,7 +137,7 @@ app.get('/api/download', async (req, res) => {
 app.get('/api/download/csv', async (req, res) => {
   try {
     const batch = req.query.batch;
-    const all = await getLastResults(10000, { fresh: true });
+    const all = await getLastResults(Infinity, { fresh: true });
     let data = batch ? all.filter(r => String(r.batch_number) === String(batch)) : all;
     // Exclude creators with email that have already been downloaded
     data = data.filter(r => !(r.email && r.email !== 'Not listed' && r.instantly_sent_at));
@@ -190,7 +190,7 @@ app.get('/api/download/top', async (req, res) => {
   try {
     const count = Math.max(parseInt(req.query.count) || 0, 0); // 0 = all
     const format = req.query.format === 'csv' ? 'csv' : 'xlsx';
-    let rows = await getLastResults(10000, { fresh: true });
+    let rows = await getLastResults(Infinity, { fresh: true });
     if (req.query.email === 'has') rows = rows.filter(hasEmail);
     if (req.query.email === 'none') rows = rows.filter(r => !hasEmail(r));
     if (req.query.excludeSent === 'true') rows = rows.filter(r => !r.instantly_sent_at);
@@ -281,7 +281,7 @@ app.post('/api/instantly/push', async (req, res) => {
   if (!apiKey) return res.status(400).json({ error: 'INSTANTLY_API_KEY must be set in .env' });
   try {
     const { batch, campaign } = req.body;
-    const all = await getLastResults(10000, { fresh: true });
+    const all = await getLastResults(Infinity, { fresh: true });
     let creators = batch ? all.filter(r => String(r.batch_number) === String(batch)) : all;
     if (campaign === true || campaign === 'true') creators = creators.filter(isCampaignCreator);
     if (creators.length === 0) return res.status(404).json({ error: 'No creators found' });

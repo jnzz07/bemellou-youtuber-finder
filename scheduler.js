@@ -161,14 +161,20 @@ const RESULTS_CACHE_TTL = 10_000;
 
 function invalidateResultsCache() { resultsCache = { rows: null, at: 0 }; }
 
-async function getLastResults(limit = 10000, { fresh = false } = {}) {
+// limit defaults to Infinity = every row. The old hardcoded `LIMIT 10000` in the SQL
+// silently dropped the NEWEST rows (ORDER BY is ascending), so exports and the dashboard
+// stopped at 10,000 while the table kept growing past it.
+// The cache is NOT keyed by limit, so the query must always fetch the FULL table and let
+// callers slice in JS. Moving the limit into the SQL would let a small-limit call
+// (e.g. /api/results?limit=50) poison the cache for the next full download.
+async function getLastResults(limit = Infinity, { fresh = false } = {}) {
   const p = getPool();
-  if (!p) return memoryResults.slice(-limit);
+  if (!p) return limit === Infinity ? memoryResults.slice() : memoryResults.slice(-limit);
   if (!fresh && resultsCache.rows && Date.now() - resultsCache.at < RESULTS_CACHE_TTL) {
     return resultsCache.rows.slice(0, limit);
   }
   try {
-    const res = await p.query('SELECT * FROM creators ORDER BY batch_number ASC, id ASC LIMIT 10000');
+    const res = await p.query('SELECT * FROM creators ORDER BY batch_number ASC, id ASC');
     resultsCache = { rows: res.rows, at: Date.now() };
     return res.rows.slice(0, limit);
   } catch (e) { return []; }
@@ -531,6 +537,107 @@ const SEARCH_QUERIES = [
   'kawaii small channel vlog','plushie content creator vlog',
   'stuffed animal collector vlog small','squishmallow small channel',
   'emotional support plushie vlog','comfort content creator vlog',
+
+  // -- Expansion: terms aimed at the four SAVED niches (mental health,
+  // neurodivergent, emotional healing, chronic illness). getNiche() is
+  // first-match-wins and tests asmr / spiritual / kawaii BEFORE those, so
+  // these deliberately avoid that vocabulary.
+
+  // neurodivergent - adhd
+  'adhd morning routine', 'adhd night routine', 'adhd cleaning motivation', 'adhd time blindness',
+  'adhd paralysis vlog', 'adhd burnout recovery', 'adhd diagnosis story adult', 'diagnosed with adhd at 25',
+  'adhd in women symptoms', 'late diagnosed adhd woman', 'adhd medication vlog', 'adhd executive dysfunction',
+  'adhd body doubling', 'adhd task initiation', 'adhd overstimulated', 'adhd sensory overload',
+  'adhd emotional regulation', 'adhd hygiene routine', 'adhd laundry system', 'adhd doom box',
+  'adhd revenge bedtime procrastination', 'adhd student vlog', 'adhd work from home', 'adhd friendly cleaning',
+  'adhd rejection sensitivity', 'adhd meal prep struggle', 'adhd tips that actually work', 'adhd routine that works',
+  'adhd apartment tour', 'adhd organization system', 'adhd brain dump journal', 'adhd and depression vlog',
+  'unmedicated adhd vlog', 'adhd woman in her 20s', 'adhd mom vlog', 'adhd tax vlog',
+
+  // neurodivergent - autism
+  'autistic burnout recovery', 'autistic masking vlog', 'late diagnosed autistic woman', 'autism diagnosis story adult',
+  'autistic meltdown vlog', 'autistic shutdown vlog', 'autistic stimming vlog', 'sensory friendly routine',
+  'autistic special interest vlog', 'autism and adhd audhd', 'audhd vlog', 'audhd woman',
+  'autistic girl day in my life', 'autism social battery', 'autistic unmasking journey', 'sensory overload grocery store',
+  'autistic safe foods', 'autistic sensory kit', 'noise sensitivity vlog', 'autistic adult routine',
+  'autism acceptance creator', 'autistic comfort items', 'stim toys vlog', 'weighted blanket anxiety',
+  'autistic burnout vs depression', 'level 1 autism vlog', 'autistic woman diagnosed late', 'neurodivergent morning routine',
+  'neurodivergent burnout vlog', 'neurodivergent creator day in my life', 'neurodivergent self care routine', 'neurodivergent friendly home',
+
+  // mental health - anxiety
+  'high functioning anxiety vlog', 'anxiety morning routine', 'anxiety attack what it feels like', 'health anxiety vlog',
+  'generalized anxiety disorder vlog', 'anxiety and overthinking', 'nervous system regulation vlog', 'nervous system reset routine',
+  'somatic exercises anxiety', 'vagus nerve exercises anxiety', 'grounding techniques panic attack', 'box breathing anxiety',
+  'panic disorder vlog', 'agoraphobia vlog', 'social anxiety exposure', 'driving anxiety vlog',
+  'anxiety at work vlog', 'anticipatory anxiety vlog', 'anxiety spiral vlog', 'calming my anxiety routine',
+  'what anxiety actually feels like', 'how i manage my anxiety', 'anxiety honest vlog', 'anxiety relief that actually works',
+  'hypervigilance vlog', 'derealization anxiety', 'dissociation vlog', 'emotional dysregulation vlog',
+
+  // mental health - depression
+  'depression nest cleaning', 'depression room clean with me', 'everything shower depression', 'bare minimum routine depression',
+  'low energy day routine', 'surviving a depressive episode', 'functional depression vlog', 'seasonal depression vlog',
+  'winter blues routine', 'depression recovery honest vlog', 'living alone with depression', 'depression and motivation vlog',
+  'getting out of bed depression', 'depression meal ideas', 'antidepressant vlog', 'starting antidepressants',
+  'ssri side effects vlog', 'depression awareness creator', 'bed rotting depression', 'depression naps vlog',
+
+  // mental health - therapy and treatment
+  'therapy homework vlog', 'first therapy session', 'starting therapy at 25', 'emdr therapy vlog',
+  'cbt for anxiety vlog', 'dbt skills vlog', 'trauma therapy journey', 'therapist recommended habits',
+  'in therapy for years vlog', 'therapy is expensive vlog', 'affordable therapy tips', 'mental health resources us',
+  'mental health hospital vlog', 'psych ward experience', 'intensive outpatient program vlog', 'mental health day off work',
+  'calling in sick mental health', 'medical gaslighting mental health', 'finding a therapist vlog', 'therapy talk honest',
+
+  // mental health - burnout, ocd, and other
+  'burnout recovery routine', 'compassion fatigue vlog', 'caregiver burnout vlog', 'work burnout quit vlog',
+  'job burnout recovery', 'hustle culture burnout', 'nurse burnout vlog', 'teacher burnout vlog',
+  'ocd intrusive thoughts vlog', 'ocd compulsions vlog', 'pure o ocd vlog', 'contamination ocd vlog',
+  'ptsd healing vlog', 'cptsd healing journey', 'complex trauma healing', 'childhood trauma healing vlog',
+  'bipolar 2 vlog', 'bpd healing vlog', 'eating disorder recovery vlog', 'body image healing vlog',
+  'intuitive eating recovery', 'postpartum anxiety vlog', 'pmdd mental health', 'menstrual mental health',
+  'overstimulated mom vlog', 'mom burnout vlog', 'loneliness vlog', 'lonely in my 20s',
+  'feeling behind in life', 'imposter syndrome vlog', 'perfectionism recovery', 'people pleasing anxiety',
+  'mental health check in with me', 'nobody talks about anxiety', 'mental health honest vlog', 'unfiltered mental health vlog',
+  'raw mental health vlog', 'mental health real talk', 'mental illness stigma vlog', 'mental health awareness month vlog',
+
+  // emotional healing - grief
+  'grief journey vlog', 'grieving a parent vlog', 'losing my mom grief', 'losing my dad vlog',
+  'grief anniversary vlog', 'pet loss grief vlog', 'miscarriage grief vlog', 'anticipatory grief vlog',
+  'grief and anxiety', 'widow vlog healing', 'grief in your 20s', 'sudden loss grief vlog',
+  'first year of grief', 'grief support vlog', 'sibling loss vlog', 'grief comfort items',
+
+  // emotional healing - breakups and relationships
+  'breakup recovery routine', 'healing after a breakup vlog', 'no contact healing', 'situationship recovery',
+  'almost relationship grief', 'getting over someone vlog', 'post breakup glow up mental health', 'divorce healing vlog',
+  'toxic relationship survivor', 'leaving a toxic relationship', 'narcissistic abuse recovery', 'emotional abuse recovery vlog',
+  'trauma bond healing', 'codependency recovery vlog', 'boundaries with family vlog', 'estranged from family vlog',
+  'no contact with parents', 'family estrangement healing', 'childhood emotional neglect', 'emotionally immature parents',
+  'anxious attachment healing', 'avoidant attachment vlog', 'fearful avoidant healing', 'friendship breakup grief',
+  'losing friends in your 20s', 'outgrowing friends vlog', 'self abandonment healing', 'reparenting myself vlog',
+  'self forgiveness vlog', 'letting go healing vlog', 'talking stage anxiety', 'dating with anxiety vlog',
+
+  // chronic illness
+  'chronic illness morning routine', 'chronic illness flare up vlog', 'chronic pain flare day', 'spoonie day in my life',
+  'spoon theory explained', 'chronic fatigue syndrome vlog', 'me cfs vlog', 'long covid vlog',
+  'long covid recovery', 'pots syndrome vlog', 'pots flare up', 'dysautonomia vlog',
+  'eds hypermobility vlog', 'hypermobile eds day in my life', 'fibromyalgia flare up', 'fibromyalgia pain management',
+  'endometriosis flare vlog', 'endo belly vlog', 'pcos and mental health', 'autoimmune flare vlog',
+  'lupus day in my life', 'rheumatoid arthritis vlog', 'hashimotos vlog', 'crohns disease vlog',
+  'ulcerative colitis vlog', 'ibd day in my life', 'celiac disease vlog', 'ms diagnosis vlog',
+  'multiple sclerosis vlog', 'chronic migraine routine', 'vestibular migraine vlog', 'invisible disability vlog',
+  'disabled creator vlog', 'ambulatory wheelchair user vlog', 'mobility aid vlog', 'cane user vlog',
+  'chronic illness bed rotting', 'bed bound day vlog', 'hospital day vlog chronic', 'infusion day vlog',
+  'medical gaslighting vlog', 'chronic illness diagnosis journey', 'chronic illness and anxiety', 'chronic illness mental health',
+  'chronic illness comfort items', 'chronic illness care package', 'pacing chronic illness', 'chronic illness accommodations',
+  'working with chronic illness', 'chronic illness college vlog', 'chronic illness self care', 'chronic illness rest day',
+
+  // format variants anchored to the saved niches
+  'day in my life anxiety', 'day in the life depression', 'week in my life mental health', 'night routine anxiety',
+  'morning routine depression', 'clean with me anxiety', 'reset day mental health', 'rot day vlog mental health',
+  'comfort items anxiety', 'comfort object adult anxiety', 'emotional support items vlog', 'things that help my anxiety',
+  'what helps my depression', 'mental health must haves', 'anxiety toolkit vlog', 'coping skills vlog',
+  'low spoons day', 'survival mode vlog', 'hard day vlog mental health', 'bad mental health day vlog',
+  'recovery era vlog', 'healing era vlog', 'soft healing vlog', 'gentle routine mental health',
+  'slow day mental health', 'rest is productive vlog', 'doing the bare minimum vlog', 'surviving not thriving vlog',
 ];
 
 // Deduplicate
@@ -696,6 +803,18 @@ async function fetchChannelMetrics(ch, km) {
 // ─── MAIN BATCH ───────────────────────────────────────────────────────────────
 const TARGET = 300;
 
+// Search depth. The top-50 relevance results for our query set have been fully mined
+// after ~840 batches, so we now follow nextPageToken to reach results 51-150 — channels
+// the finder has never fetched. search.list costs 100 units PER PAGE, so query count and
+// page depth trade off directly against the same budget:
+//   before: 180 queries x 1 page x 100 = 18,000 units
+//   now:     60 queries x 3 pages x 100 = 18,000 units
+// Sized for 10 API keys running 5 batches/day (~20,000 units/batch, 100,000/day).
+// Do NOT raise PAGES_PER_QUERY without lowering QUERIES_PER_BATCH to match, or keys
+// will exhaust mid-batch.
+const PAGES_PER_QUERY   = 3;
+const QUERIES_PER_BATCH = 60;
+
 // App-launch campaign quality gate — high-engagement, closable mental-health creators.
 // A creator must clear ALL thresholds AND fall in the mental-health niche cluster.
 // View floor removed: this pipeline hunts micro/nano creators (best for commission
@@ -726,13 +845,13 @@ async function runBatch(km) {
   // Campaign mode: re-evaluate previously-seen channels too. saveCreator upserts
   // by channel ID, so re-finding a qualifier refreshes its row rather than duplicating.
   const discoveredIds = []; // ordered list of channel IDs (seen or not)
+  const discoveredSet = new Set(); // O(1) dedupe — the id list now reaches ~9,000 entries
 
   // ── PHASE 1: SEARCH — collect channel IDs ─────────────────────────────────
-  // Cap at 180 queries per batch (100 units each = 18,000 units total for search).
-  // Sized for 10 API keys running 5 batches/day (~20,000 units/batch, 100,000/day).
+  // Quota math lives on PAGES_PER_QUERY / QUERIES_PER_BATCH above.
   // Queries are shuffled so every batch explores a different subset.
-  const queries = shuffle(QUERIES).slice(0, 180);
-  log(`Phase 1: ${queries.length} queries (${QUERIES.length} total available)`);
+  const queries = shuffle(QUERIES).slice(0, QUERIES_PER_BATCH);
+  log(`Phase 1: ${queries.length} queries x ${PAGES_PER_QUERY} pages (${QUERIES.length} total available)`);
   liveState.progress = { phase: 'Searching', done: 0, total: queries.length, currentName: '', foundSoFar: 0 };
 
   for (let qi = 0; qi < queries.length; qi++) {
@@ -741,28 +860,45 @@ async function runBatch(km) {
     liveState.progress.done = qi;
     liveState.progress.currentName = queries[qi];
 
-    try {
-      const data = await ytGet('search', {
-        part: 'snippet',
-        q: queries[qi],
-        type: 'video',
-        maxResults: 50,
-        relevanceLanguage: 'en',
-        order: 'relevance',
-      }, km);
+    let pageToken;
+    let exhausted = false;
 
-      for (const item of data?.items || []) {
-        const id = item.snippet?.channelId;
-        if (id && !discoveredIds.includes(id)) {
-          discoveredIds.push(id);
+    for (let page = 0; page < PAGES_PER_QUERY; page++) {
+      // Re-check per page: a single query now spends up to 300 units, so keys can run
+      // out partway through one term.
+      if (!km.hasKeys()) { log('All keys exhausted in search phase'); exhausted = true; break; }
+
+      try {
+        const data = await ytGet('search', {
+          part: 'snippet',
+          q: queries[qi],
+          type: 'video',
+          maxResults: 50,
+          relevanceLanguage: 'en',
+          order: 'relevance',
+          ...(pageToken ? { pageToken } : {}),
+        }, km);
+
+        for (const item of data?.items || []) {
+          const id = item.snippet?.channelId;
+          if (id && !discoveredSet.has(id)) {
+            discoveredSet.add(id);
+            discoveredIds.push(id);
+          }
         }
+
+        pageToken = data?.nextPageToken;
+        if (!pageToken) break; // no deeper results for this term
+      } catch (e) {
+        if (e.message === 'ALL_KEYS_EXHAUSTED') { exhausted = true; break; }
+        log(`Search error "${queries[qi]}" p${page + 1}: ${e.message}`);
+        break; // skip remaining pages for this term, keep going with the next term
       }
-    } catch (e) {
-      if (e.message === 'ALL_KEYS_EXHAUSTED') break;
-      log(`Search error "${queries[qi]}": ${e.message}`);
+
+      await sleep(250);
     }
 
-    await sleep(250);
+    if (exhausted) break;
   }
 
   log(`Phase 1 done: ${discoveredIds.length} new channel IDs`);

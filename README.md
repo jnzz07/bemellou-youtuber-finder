@@ -1,6 +1,6 @@
-# Chubiez YouTuber Finder
+﻿# Bemellou YouTuber Finder
 
-Auto-discovers YouTube creators matching Chubiez brand criteria (mental health, cozy lifestyle, plush/kawaii culture). Finds 50 new qualifying channels every 24 hours and exports them to a downloadable spreadsheet.
+Auto-discovers YouTube creators matching Bemellou brand criteria (mental health, cozy lifestyle, plush/kawaii culture). Finds 50 new qualifying channels every 24 hours and exports them to a downloadable spreadsheet.
 
 ## Setup
 
@@ -67,8 +67,8 @@ cron.schedule('0 9 * * 1', ...)  // Every Monday at 09:00 UTC
 ## Docker
 
 ```bash
-docker build -t chubiez-finder .
-docker run -p 3000:3000 --env-file .env chubiez-finder
+docker build -t bemellou-finder .
+docker run -p 3000:3000 --env-file .env bemellou-finder
 ```
 
 ## API Quota Notes

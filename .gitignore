@@ -4,3 +4,17 @@ data/results.xlsx
 data/seen.json
 data/state.json
 logs/
+
+# Local creator exports — contains emails, never commit
+exports/
+
+# Local research data with scraped creator emails, never commit
+data/legacy/
+pool.json
+pool-out.json
+discovered-raw.json
+discovered-out.json
+emails-map.json
+sample.json
+sample-out.json
+seen.json

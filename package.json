@@ -1,7 +1,7 @@
-{
-  "name": "chubiez-youtuber-finder",
+﻿{
+  "name": "bemellou-youtuber-finder",
   "version": "1.0.0",
-  "description": "Auto-discover YouTube creators matching Chubiez brand criteria",
+  "description": "Auto-discover YouTube creators matching Bemellou brand criteria",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
